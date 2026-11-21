@@ -3,6 +3,7 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <whisper/whisper.h>
 #include <math.h>
+#import <Metal/Metal.h>
 
 NSError *VKError(NSString *description) {
     return [NSError errorWithDomain:@"VoiceKey" code:1
@@ -103,15 +104,43 @@ static AVAudioPCMBuffer *ReadAudio(NSURL *url, NSError **error) {
     return status == AVAudioConverterOutputStatus_Error ? nil : output;
 }
 
-static NSString *Recognize(AVAudioPCMBuffer *audio, NSURL *modelURL) {
-    struct whisper_context_params contextParameters = whisper_context_default_params();
-    contextParameters.use_gpu = false;
-    struct whisper_context *context = whisper_init_from_file_with_params(modelURL.fileSystemRepresentation,
-                                                                        contextParameters);
-    if (!context) return nil;
-
+@implementation VKRecognizer {
+    NSURL *_model;
+    NSString *_language;
+    struct whisper_context *_context;
+}
+- (instancetype)initWithModel:(NSURL *)model language:(NSString *)language {
+    if ((self = [super init])) {
+        _model = model;
+        _language = [language copy];
+    }
+    return self;
+}
+- (void)dealloc {
+    if (_context) whisper_free(_context);
+}
+- (NSString *)recognize:(const float *)samples count:(NSUInteger)count error:(NSError **)error {
+    if (!count || count > INT_MAX) return @"";
+    float peak = 0;
+    for (NSUInteger i = 0; i < count && peak < 0.0001f; i++) peak = fmaxf(peak, fabsf(samples[i]));
+    if (peak < 0.0001f) return @"";
+    if (!_context) {
+        struct whisper_context_params options = whisper_context_default_params();
+        options.use_gpu = MTLCreateSystemDefaultDevice() != nil;
+        _context = whisper_init_from_file_with_params(_model.fileSystemRepresentation, options);
+        if (!_context && options.use_gpu) {
+            options.use_gpu = false;
+            _context = whisper_init_from_file_with_params(_model.fileSystemRepresentation, options);
+        }
+        if (!_context) {
+            if (error) *error = VKError(@"Whisper could not load this model. Try another model.");
+            return nil;
+        }
+    }
     struct whisper_full_params parameters = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    parameters.language = "auto";
+    parameters.language = _language.UTF8String;
+    parameters.no_context = true;
+    parameters.suppress_nst = true;
     parameters.n_threads = (int)MIN(8, NSProcessInfo.processInfo.activeProcessorCount);
     parameters.no_timestamps = true;
     parameters.print_progress = false;
@@ -121,20 +150,22 @@ static NSString *Recognize(AVAudioPCMBuffer *audio, NSURL *modelURL) {
     parameters.suppress_blank = true;
 
     NSMutableString *transcript = nil;
-    if (whisper_full(context, parameters, audio.floatChannelData[0], (int)audio.frameLength) == 0) {
+    if (whisper_full(_context, parameters, samples, (int)count) == 0) {
         transcript = [NSMutableString string];
-        int count = whisper_full_n_segments(context);
+        int count = whisper_full_n_segments(_context);
         for (int segment = 0; segment < count; segment++) {
-            const char *bytes = whisper_full_get_segment_text(context, segment);
+            const char *bytes = whisper_full_get_segment_text(_context, segment);
             if (bytes) {
                 NSString *text = [NSString stringWithUTF8String:bytes];
                 if (text) [transcript appendString:text];
             }
         }
     }
-    whisper_free(context);
+    if (!transcript && error) *error = VKError(@"Whisper could not transcribe this phrase.");
     return [transcript stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
 }
+
+@end
 
 NSString *VKTranscribe(NSURL *audioURL, NSURL *modelURL, NSError **error) {
     AVAudioPCMBuffer *audio = ReadAudio(audioURL, error);
@@ -144,13 +175,6 @@ NSString *VKTranscribe(NSURL *audioURL, NSURL *modelURL, NSError **error) {
         return nil;
     }
 
-    float peak = 0;
-    for (AVAudioFrameCount i = 0; i < audio.frameLength && peak < 0.0001f; i++) {
-        peak = fmaxf(peak, fabsf(audio.floatChannelData[0][i]));
-    }
-    if (peak < 0.0001f) return @"";
-
-    NSString *text = Recognize(audio, modelURL);
-    if (!text && error) *error = VKError(@"Whisper could not transcribe this recording. Try again or select another model.");
-    return text;
+    VKRecognizer *recognizer = [[VKRecognizer alloc] initWithModel:modelURL language:@"auto"];
+    return [recognizer recognize:audio.floatChannelData[0] count:audio.frameLength error:error];
 }

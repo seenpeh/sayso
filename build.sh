@@ -3,7 +3,7 @@ set -euo pipefail
 
 project_dir="$(cd "$(dirname "$0")" && pwd)"
 build_dir="$project_dir/.build"
-app_path="${1:-$project_dir/VoiceKey.app}"
+app_path="${1:-$project_dir/Sayso.app}"
 framework="$build_dir/whisper.framework"
 version="v1.8.4"
 archive_sha="1c7a93bd20fe4e57e0af12051ddb34b7a434dfc9acc02c8313393150b6d1821f"
@@ -35,7 +35,7 @@ fi
 
 stage="$(mktemp -d "${TMPDIR:-/tmp}/voicekey-build.XXXXXXXX")"
 trap 'rm -rf "$stage"' EXIT
-bundle="$stage/VoiceKey.app"
+bundle="$stage/Sayso.app"
 mkdir -p "$bundle/Contents/"{MacOS,Frameworks,Resources}
 cp -RPX "$framework" "$bundle/Contents/Frameworks/whisper.framework"
 cp "$build_dir/whisper-LICENSE" "$bundle/Contents/Resources/Whisper-LICENSE.txt"
@@ -48,9 +48,9 @@ plutil -lint "$bundle/Contents/Info.plist"
     -isystem "$sdk/usr/include" -L"$sdk/usr/lib" \
     -Wall -Wextra -Wno-unused-parameter -F"$build_dir" -framework whisper \
     -framework Foundation -framework AppKit -framework AVFoundation -framework Carbon \
-    -framework AudioToolbox -framework ServiceManagement -lobjc \
+    -framework ApplicationServices -framework CoreGraphics -framework Metal -framework AudioToolbox -framework ServiceManagement -lobjc \
     -Wl,-rpath,@executable_path/../Frameworks \
-    "$project_dir/Sources/main.m" "$project_dir/Sources/WhisperEngine.m" \
+    "$project_dir/Sources/"*.m \
     -o "$bundle/Contents/MacOS/VoiceKey"
 
 xattr -cr "$bundle"

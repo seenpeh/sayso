@@ -3,6 +3,9 @@
 #import <Carbon/Carbon.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import "WhisperEngine.h"
+#import "PhraseCapture.h"
+#import "ReleaseUpdater.h"
+#import <ApplicationServices/ApplicationServices.h>
 
 typedef struct {
     const char *title;
@@ -10,21 +13,28 @@ typedef struct {
     const char *filename;
     uint64_t bytes;
     const char *sha256;
+    const char *origin;
 } Model;
 
 static const Model models[] = {
     {"Whisper Large v3 Turbo", "574 MB", "ggml-large-v3-turbo-q5_0.bin", 574041195,
-     "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"},
+     "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2", NULL},
     {"Whisper Base", "60 MB", "ggml-base-q5_1.bin", 59707625,
-     "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898"},
-    {"Whisper Tiny", "32 MB", "ggml-tiny-q5_1.bin", 32152673,
-     "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7"},
+     "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898", NULL},
     {"Whisper Small", "190 MB", "ggml-small-q5_1.bin", 190085487,
-     "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb"},
+     "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb", NULL},
     {"Whisper Medium", "539 MB", "ggml-medium-q5_0.bin", 539212467,
-     "19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f"}
+     "19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f", NULL},
+    {"Persian Base · فارسی", "82 MB", "ggml-base-persian-q8_0.bin", 81768602,
+     "a8bcb0746be5c9741ba8d1c87c89cccb6fa1452e7878275071f5165a7c43f4a7",
+     "https://huggingface.co/armantee/whisper-base-persian-ggml/resolve/ea634cb5f241db4234de61cec5353c356868c88e"},
+    {"Nava · فارسی", "574 MB", "ggml-nava-q5_0.bin", 574041195,
+     "e788c333480c50fbde2e4c7c145a46f90fed6e055892c9d81582a6d11af84b0f",
+     "https://huggingface.co/Nimruz/Nava-ggml/resolve/b4cc11c89fe8ec82619c8b4f97d1ea60c40ae6aa"}
 };
 static const NSInteger modelCount = sizeof(models) / sizeof(models[0]);
+static const NSInteger persianBase = 4;
+static BOOL PersianOnly(NSInteger index) { return index == persianBase || index == 5; }
 static const NSInteger noModel = -1;
 static NSString *const defaultShortcut = @"⌥⇧Space";
 static NSString *const modelOrigin =
@@ -91,7 +101,7 @@ static NSImage *Symbol(NSString *name, NSString *description, CGFloat size) {
 }
 @end
 
-@interface VoiceKey : NSObject <NSApplicationDelegate, NSWindowDelegate, NSURLSessionDataDelegate, AVAudioRecorderDelegate>
+@interface VoiceKey : NSObject <NSApplicationDelegate, NSWindowDelegate, NSURLSessionDataDelegate>
 @property Phase phase;
 @property NSInteger selectedModel;
 @property OSStatus shortcutStatus;
@@ -113,7 +123,14 @@ static NSImage *Symbol(NSString *name, NSString *description, CGFloat size) {
 @property (strong) NSButton *removeButton;
 @property (strong) NSTextField *settingsModelStatus;
 @property (strong) NSProgressIndicator *settingsProgress;
-@property BOOL autoCopy;
+@property (strong) NSPopUpButton *languagePicker;
+@property (strong) ReleaseUpdater *updater;
+@property (strong) NSButton *updateButton;
+@property (strong) NSButton *settingsUpdate;
+@property (strong) NSTextField *updateStatus;
+@property (strong) NSDate *lastCheck;
+@property (strong) NSTimer *updateTimer;
+@property (copy) NSString *offeredVersion;
 @property (strong) NSStatusItem *statusItem;
 @property (strong) NSPopover *popover;
 @property (strong) NSStackView *page;
@@ -125,16 +142,21 @@ static NSImage *Symbol(NSString *name, NSString *description, CGFloat size) {
 @property (strong) NSProgressIndicator *progress;
 @property (strong) NSPopUpButton *modelPicker;
 @property (strong) NSButton *recordButton;
-@property (strong) NSButton *transcriptCopyButton;
 @property (strong) NSButton *downloadButton;
-@property (strong) NSStackView *transcriptSection;
-@property (strong) NSTextView *transcriptView;
 @property (strong) NSURLSession *session;
 @property (strong) NSURLSessionDataTask *downloadTask;
-@property (strong) AVAudioRecorder *recorder;
-@property (strong) NSURL *recordingFolder;
+@property (strong) PhraseCapture *capture;
+@property (strong) VKRecognizer *recognizer;
+@property (strong) dispatch_queue_t recognitionQueue;
+@property (strong) NSMutableArray<NSData *> *pending;
+@property BOOL decoding;
+@property BOOL typedPhrase;
+@property NSUInteger generation;
+@property (strong) NSDate *started;
+@property (strong) NSRunningApplication *destination;
+@property (strong) NSRunningApplication *popoverDestination;
+@property (strong) id focusedElement;
 @property (strong) NSTimer *timer;
-@property (copy) NSString *transcript;
 @property (copy) NSString *notice;
 @property BOOL failed;
 @property double downloadedFraction;
@@ -163,10 +185,19 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     [defaults registerDefaults:@{@"shortcutKey": @(kVK_Space), @"shortcutModifiers": @(optionKey | shiftKey),
-                                 @"shortcutTitle": defaultShortcut, @"autoCopy": @YES}];
+                                 @"shortcutTitle": defaultShortcut, @"language": @"auto"}];
     NSInteger saved = [defaults integerForKey:@"selectedModel"];
-    self.selectedModel = saved >= noModel && saved < modelCount ? saved : 0;
-    self.autoCopy = [defaults boolForKey:@"autoCopy"];
+    if ([defaults objectForKey:@"selectedModel"] && ![defaults boolForKey:@"removedTinyModels"]) {
+        if (saved == 2 || saved == 6) saved = persianBase;
+        else if (saved >= 3 && saved <= 5) saved--;
+        [defaults setInteger:saved forKey:@"selectedModel"];
+    }
+    [defaults setBool:YES forKey:@"removedTinyModels"];
+    self.selectedModel = [defaults objectForKey:@"selectedModel"] && saved >= noModel && saved < modelCount
+        ? saved : [defaults boolForKey:@"hasLaunched"] ? 0 : persianBase;
+    self.recognitionQueue = dispatch_queue_create("sayso.recognition", DISPATCH_QUEUE_SERIAL);
+    self.pending = [NSMutableArray array];
+    self.updater = [ReleaseUpdater new];
     self.shortcutKey = (UInt32)[defaults integerForKey:@"shortcutKey"];
     self.shortcutModifiers = (UInt32)[defaults integerForKey:@"shortcutModifiers"];
     self.shortcutTitle = [defaults stringForKey:@"shortcutTitle"];
@@ -190,6 +221,14 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     configuration.timeoutIntervalForResource = 6 * 60 * 60;
     self.session = [NSURLSession sessionWithConfiguration:configuration delegate:self
                                             delegateQueue:NSOperationQueue.mainQueue];
+    __weak VoiceKey *app = self;
+    self.updater.changed = ^{ [app updateChanged]; };
+    [self checkUpdates:nil];
+    self.updateTimer = [NSTimer scheduledTimerWithTimeInterval:86400 repeats:YES block:^(NSTimer *timer) {
+        [app checkUpdates:nil];
+    }];
+    [NSWorkspace.sharedWorkspace.notificationCenter addObserver:self selector:@selector(didWake:)
+        name:NSWorkspaceDidWakeNotification object:nil];
     [self refresh];
     if (![defaults boolForKey:@"hasLaunched"]) {
         [defaults setBool:YES forKey:@"hasLaunched"];
@@ -203,12 +242,42 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     [self.retryTimer invalidate];
     [self.partialFile closeFile];
     [self.session invalidateAndCancel];
-    [self.recorder stop];
-    [self cleanRecording];
+    [self.updateTimer invalidate];
+    [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:self];
+    [self cancelCapture];
 }
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
     if (self.settingsWindow.visible) [self updateLoginControls];
+}
+
+- (void)didWake:(NSNotification *)notification {
+    if (-self.lastCheck.timeIntervalSinceNow >= 86400) [self checkUpdates:nil];
+}
+
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)visible {
+    [self checkUpdates:nil];
+    [self showPopover];
+    return YES;
+}
+
+- (void)checkUpdates:(id)sender {
+    self.lastCheck = [NSDate date];
+    [self.updater check];
+}
+
+- (void)updateAction:(id)sender {
+    if (self.updater.availableVersion && self.phase == Idle) [self.updater install];
+    else [self checkUpdates:sender];
+}
+
+- (void)updateChanged {
+    [self refresh];
+    if (self.phase == Idle && self.updater.availableVersion &&
+        ![self.offeredVersion isEqual:self.updater.availableVersion]) {
+        self.offeredVersion = self.updater.availableVersion;
+        if (!self.settingsWindow.visible) [self showPopover];
+    }
 }
 
 - (void)windowDidResignKey:(NSNotification *)notification {
@@ -271,34 +340,43 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.settingsProgress.controlSize = NSControlSizeSmall;
     [self.settingsProgress setAccessibilityLabel:@"Model download progress"];
 
-    self.loginButton = [NSButton checkboxWithTitle:@"Start VoiceKey at login" target:self action:@selector(toggleLogin:)];
+    self.loginButton = [NSButton checkboxWithTitle:@"Start Sayso at login" target:self action:@selector(toggleLogin:)];
     self.loginSettingsButton = [self button:@"Open Login Items" action:@selector(openLoginSettings:)];
     NSStackView *loginRow = Stack(NSUserInterfaceLayoutOrientationHorizontal,
         @[self.loginButton, self.loginSettingsButton], 8);
     self.loginMessage = [NSTextField wrappingLabelWithString:@""];
     self.loginMessage.font = [NSFont systemFontOfSize:12];
     self.loginMessage.textColor = secondary;
-    NSButton *copy = [NSButton checkboxWithTitle:@"Copy new transcripts to the clipboard" target:self action:@selector(toggleAutoCopy:)];
-    copy.state = self.autoCopy ? NSControlStateValueOn : NSControlStateValueOff;
+    self.languagePicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.languagePicker addItemsWithTitles:@[@"Detect language", @"Persian · فارسی"]];
+    [self.languagePicker setAccessibilityLabel:@"Spoken language"];
+    self.languagePicker.target = self;
+    self.languagePicker.action = @selector(changeLanguage:);
+    self.settingsUpdate = [self button:@"Check for Updates…" action:@selector(updateAction:)];
+    self.updateStatus = [NSTextField wrappingLabelWithString:@""];
+    self.updateStatus.textColor = secondary;
+    self.updateStatus.font = [NSFont systemFontOfSize:12];
+    NSStackView *languageRow = Stack(NSUserInterfaceLayoutOrientationHorizontal,
+        @[Label(@"Spoken language", 12, NSFontWeightRegular, primary), self.languagePicker], 10);
 
     NSTextField *shortcutHeading = Label(@"Global shortcut", 14, NSFontWeightSemibold, primary);
     NSTextField *modelsHeading = Label(@"Local models", 14, NSFontWeightSemibold, primary);
     NSTextField *generalHeading = Label(@"General", 14, NSFontWeightSemibold, primary);
-    self.uninstallButton = [self button:@"Uninstall VoiceKey…" action:@selector(uninstall:)];
+    self.uninstallButton = [self button:@"Uninstall Sayso…" action:@selector(uninstall:)];
     NSStackView *body = Stack(NSUserInterfaceLayoutOrientationVertical,
-        @[shortcutHeading, shortcutRow, self.shortcutMessage, modelsHeading, modelRow, self.settingsModelStatus,
-          self.settingsProgress, generalHeading, loginRow, self.loginMessage, copy, self.uninstallButton], 7);
+        @[shortcutHeading, shortcutRow, self.shortcutMessage, modelsHeading, modelRow, languageRow, self.settingsModelStatus,
+          self.settingsProgress, generalHeading, loginRow, self.loginMessage, self.settingsUpdate, self.updateStatus, self.uninstallButton], 7);
     body.alignment = NSLayoutAttributeLeading;
     [body setCustomSpacing:18 afterView:self.shortcutMessage];
     [body setCustomSpacing:15 afterView:self.settingsProgress];
-    for (NSView *fullWidth in @[self.settingsModelStatus, self.settingsProgress, self.loginMessage]) {
-        [fullWidth.widthAnchor constraintEqualToConstant:454].active = YES;
+    for (NSView *fullWidth in @[self.settingsModelStatus, self.settingsProgress, self.loginMessage, self.updateStatus]) {
+        [fullWidth.widthAnchor constraintEqualToConstant:510].active = YES;
     }
 
-    self.settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 498, 410)
+    self.settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 470)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
         backing:NSBackingStoreBuffered defer:NO];
-    self.settingsWindow.title = @"VoiceKey Settings";
+    self.settingsWindow.title = @"Sayso Settings";
     self.settingsWindow.releasedWhenClosed = NO;
     self.settingsWindow.delegate = self;
     NSView *content = self.settingsWindow.contentView;
@@ -405,7 +483,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.loginButton.state = status == SMAppServiceStatusEnabled || status == SMAppServiceStatusRequiresApproval
         ? NSControlStateValueOn : NSControlStateValueOff;
     self.loginMessage.stringValue = status == SMAppServiceStatusRequiresApproval
-        ? @"Allow VoiceKey in Login Items to finish enabling this option." : @"";
+        ? @"Allow Sayso in Login Items to finish enabling this option." : @"";
 }
 
 - (void)toggleLogin:(NSButton *)sender {
@@ -421,24 +499,25 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 
 - (void)openLoginSettings:(id)sender { [SMAppService openSystemSettingsLoginItems]; }
 
-- (void)toggleAutoCopy:(NSButton *)sender {
-    self.autoCopy = sender.state == NSControlStateValueOn;
-    [NSUserDefaults.standardUserDefaults setBool:self.autoCopy forKey:@"autoCopy"];
+- (void)changeLanguage:(NSPopUpButton *)sender {
+    [NSUserDefaults.standardUserDefaults setObject:sender.indexOfSelectedItem ? @"fa" : @"auto" forKey:@"language"];
+    self.recognizer = nil;
+    [self refresh];
 }
 
 - (void)buildPopover {
     NSColor *primary = NSColor.labelColor;
     NSColor *secondary = NSColor.secondaryLabelColor;
-    NSImageView *brand = [NSImageView imageViewWithImage:Symbol(@"waveform", @"VoiceKey", 17)];
+    NSImageView *brand = [NSImageView imageViewWithImage:Symbol(@"waveform", @"Sayso", 17)];
     brand.contentTintColor = NSColor.controlAccentColor;
     self.keyLabel = Label(self.shortcutTitle, 12, NSFontWeightMedium, secondary);
     self.keyLabel.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightMedium];
     NSView *spacer = [NSView new];
     NSStackView *header = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-        @[brand, Label(@"VoiceKey", 18, NSFontWeightSemibold, primary), spacer, self.keyLabel], 8);
+        @[brand, Label(@"Sayso", 18, NSFontWeightSemibold, primary), spacer, self.keyLabel], 8);
 
     self.stateImage = [NSImageView new];
-    self.headline = Label(@"", 15, NSFontWeightSemibold, primary);
+    self.headline = Label(@"", 18, NSFontWeightSemibold, primary);
     NSStackView *state = Stack(NSUserInterfaceLayoutOrientationHorizontal,
                                @[self.stateImage, self.headline], 7);
     self.detail = [NSTextField wrappingLabelWithString:@""];
@@ -446,31 +525,29 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.detail.textColor = secondary;
     self.detail.maximumNumberOfLines = 4;
 
+    NSStackView *statusText = Stack(NSUserInterfaceLayoutOrientationVertical, @[state, self.detail], 5);
+    statusText.alignment = NSLayoutAttributeLeading;
+    [self.detail.widthAnchor constraintEqualToConstant:312].active = YES;
+    NSBox *statusCard = [NSBox new];
+    statusCard.boxType = NSBoxCustom;
+    statusCard.titlePosition = NSNoTitle;
+    statusCard.cornerRadius = 10;
+    statusCard.borderWidth = 0;
+    statusCard.fillColor = NSColor.controlBackgroundColor;
+    NSView *cardContent = statusCard.contentView;
+    [cardContent addSubview:statusText];
+    statusText.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [statusText.leadingAnchor constraintEqualToAnchor:cardContent.leadingAnchor constant:14],
+        [statusText.topAnchor constraintEqualToAnchor:cardContent.topAnchor constant:12],
+        [statusText.bottomAnchor constraintEqualToAnchor:cardContent.bottomAnchor constant:-12]
+    ]];
+
     self.recordButton = [self button:@"Record" action:@selector(toggleRecording:)];
-    self.transcriptCopyButton = [self button:@"Copy" action:@selector(copyTranscript:)];
-    NSStackView *actions = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-                                 @[self.recordButton, self.transcriptCopyButton], 8);
-
-    NSScrollView *scroll = [NSScrollView new];
-    scroll.hasVerticalScroller = YES;
-    scroll.autohidesScrollers = YES;
-    scroll.borderType = NSBezelBorder;
-    self.transcriptView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 340, 104)];
-    self.transcriptView.editable = NO;
-    self.transcriptView.selectable = YES;
-    self.transcriptView.verticallyResizable = YES;
-    self.transcriptView.horizontallyResizable = NO;
-    self.transcriptView.autoresizingMask = NSViewWidthSizable;
-    self.transcriptView.textContainer.widthTracksTextView = YES;
-    self.transcriptView.textContainerInset = NSMakeSize(8, 7);
-    [self.transcriptView setAccessibilityLabel:@"Transcript"];
-    scroll.documentView = self.transcriptView;
-    [scroll.heightAnchor constraintEqualToConstant:104].active = YES;
-    [scroll.widthAnchor constraintEqualToConstant:344].active = YES;
-    self.transcriptSection = Stack(NSUserInterfaceLayoutOrientationVertical,
-        @[Label(@"Transcript", 12, NSFontWeightSemibold, primary), scroll], 6);
-    self.transcriptSection.alignment = NSLayoutAttributeLeading;
-
+    self.recordButton.controlSize = NSControlSizeLarge;
+    self.recordButton.imagePosition = NSImageLeading;
+    self.recordButton.image = Symbol(@"mic.fill", @"", 14);
+    self.updateButton = [self button:@"Install Update…" action:@selector(updateAction:)];
     self.modelPicker = [self newModelPicker];
     self.downloadButton = [self button:@"Download" action:@selector(downloadModel:)];
     NSStackView *modelControls = Stack(NSUserInterfaceLayoutOrientationHorizontal,
@@ -482,7 +559,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.progress.maxValue = 1;
     [self.progress setAccessibilityLabel:@"Model download progress"];
 
-    NSButton *quit = [self button:@"Quit VoiceKey" action:@selector(quit:)];
+    NSButton *quit = [self button:@"Quit Sayso" action:@selector(quit:)];
     quit.bordered = NO;
     quit.font = [NSFont systemFontOfSize:12];
     NSButton *settings = [self button:@"Settings…" action:@selector(showSettings:)];
@@ -491,18 +568,16 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     line.boxType = NSBoxSeparator;
 
     self.page = Stack(NSUserInterfaceLayoutOrientationVertical,
-        @[header, state, self.detail, actions, self.transcriptSection, line,
+        @[header, statusCard, self.recordButton, line,
           Label(@"Local model", 12, NSFontWeightSemibold, primary), modelControls,
-          self.modelLabel, self.progress, footer], 9);
+          self.modelLabel, self.progress, self.updateButton, footer], 9);
     self.page.alignment = NSLayoutAttributeLeading;
     self.page.detachesHiddenViews = YES;
     [self.page setCustomSpacing:15 afterView:header];
-    [self.page setCustomSpacing:4 afterView:state];
-    [self.page setCustomSpacing:12 afterView:actions];
-    [self.page setCustomSpacing:13 afterView:self.transcriptSection];
+    [self.page setCustomSpacing:12 afterView:self.recordButton];
     [self.page setCustomSpacing:12 afterView:line];
     [self.page setCustomSpacing:4 afterView:modelControls];
-    for (NSView *fullWidth in @[header, self.detail, line, self.progress]) {
+    for (NSView *fullWidth in @[header, statusCard, self.recordButton, line, self.progress]) {
         [fullWidth.widthAnchor constraintEqualToConstant:344].active = YES;
     }
 
@@ -522,12 +597,17 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 
 - (void)showPopover {
     if (!self.popover.shown && self.statusItem.button.window) {
+        NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
+        if (front.processIdentifier != NSRunningApplication.currentApplication.processIdentifier)
+            self.popoverDestination = front;
         [self.popover showRelativeToRect:self.statusItem.button.bounds ofView:self.statusItem.button
                           preferredEdge:NSRectEdgeMinY];
     }
 }
 
 - (void)togglePopover:(id)sender {
+    if (self.phase == Recording) { [self finishRecording]; return; }
+    if (self.phase == Transcribing) return;
     if (self.popover.shown) [self.popover performClose:sender];
     else [self showPopover];
 }
@@ -557,8 +637,8 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     BOOL installed = [self modelExists];
     BOOL downloading = self.phase == Downloading || self.phase == CancelingDownload || self.phase == Verifying;
     BOOL denied = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] == AVAuthorizationStatusDenied;
-    NSString *title = installed ? @"Ready to record" : @"Download a model first";
-    NSString *subtitle = installed ? @"Press the shortcut to start and again to stop." :
+    NSString *title = installed ? @"Ready to dictate" : @"Download a model first";
+    NSString *subtitle = installed ? @"Place the cursor in a text field, then press the shortcut. Pause briefly to type each phrase." :
                                     @"Once downloaded, transcription runs on this Mac.";
     NSString *stateSymbol = installed ? @"circle.inset.filled" : @"arrow.down.circle";
     if (!hasSelection) {
@@ -577,7 +657,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
                 tint = NSColor.systemOrangeColor;
             }
             if (self.notice) subtitle = self.notice;
-            else if (installed && self.shortcutStatus != noErr) subtitle = @"The shortcut is unavailable. Use Record below.";
+            else if (installed && self.shortcutStatus != noErr) subtitle = @"The shortcut is unavailable. Click Start dictation below.";
             break;
         case Downloading:
         case CancelingDownload:
@@ -594,25 +674,24 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
             stateSymbol = @"mic";
             break;
         case Recording: {
-            NSInteger seconds = (NSInteger)self.recorder.currentTime;
-            title = [NSString stringWithFormat:@"Recording  %ld:%02ld", seconds / 60, seconds % 60];
-            subtitle = self.shortcutStatus == noErr ? @"Click Stop to transcribe." :
-                                                       @"Press the shortcut again to transcribe.";
+            NSInteger seconds = (NSInteger)(-self.started.timeIntervalSinceNow);
+            title = [NSString stringWithFormat:@"Listening  %ld:%02ld", seconds / 60, seconds % 60];
+            subtitle = [NSString stringWithFormat:@"Typing into %@ as you pause.", self.destination.localizedName ?: @"your app"];
             stateSymbol = @"record.circle.fill";
             menuSymbol = @"record.circle.fill";
             tint = NSColor.systemRedColor;
             break;
         }
         case Transcribing:
-            title = @"Transcribing…";
-            subtitle = @"Whisper is processing the recording on this Mac.";
+            title = @"Finishing dictation…";
+            subtitle = self.notice ?: @"Typing the last phrase into your text field.";
             stateSymbol = @"ellipsis.circle";
             menuSymbol = stateSymbol;
             break;
     }
 
-    NSString *menuDescription = self.phase == Recording ? @"VoiceKey, recording" :
-                                self.phase == Transcribing ? @"VoiceKey, transcribing" : @"VoiceKey";
+    NSString *menuDescription = self.phase == Recording ? @"Sayso, listening. Click to stop dictation." :
+                                self.phase == Transcribing ? @"Sayso, transcribing" : @"Sayso";
     self.statusItem.button.image = Symbol(menuSymbol, menuDescription, 14);
     self.statusItem.button.toolTip = menuDescription;
     [self.statusItem.button setAccessibilityLabel:menuDescription];
@@ -625,32 +704,51 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     [self.keyLabel setAccessibilityLabel:[@"Global shortcut " stringByAppendingString:self.shortcutTitle]];
     self.keyLabel.hidden = self.shortcutStatus != noErr;
 
-    self.recordButton.title = self.phase == Recording ? @"Stop & Transcribe" :
-                              denied ? @"Microphone Settings" : @"Record";
-    self.recordButton.enabled = (installed && self.phase == Idle) || self.phase == Recording;
+    self.recordButton.title = self.phase == Recording ? @"Stop dictation" :
+                              denied ? @"Microphone Settings" : !AXIsProcessTrusted() ? @"Enable keyboard access…" : @"Start dictation";
+    self.recordButton.enabled = (installed && self.phase == Idle && !self.updater.installing) || self.phase == Recording;
     self.recordButton.bezelColor = self.recordButton.enabled ? NSColor.controlAccentColor : nil;
-    self.transcriptCopyButton.hidden = self.transcript.length == 0;
-    self.transcriptSection.hidden = self.transcript.length == 0;
-    self.modelPicker.enabled = self.settingsPicker.enabled = self.phase == Idle;
+    BOOL available = self.phase == Idle && !self.updater.installing;
+    self.modelPicker.enabled = self.settingsPicker.enabled = available;
+    self.languagePicker.enabled = available && !PersianOnly(self.selectedModel);
+    [self.languagePicker selectItemAtIndex:PersianOnly(self.selectedModel) ||
+        [[NSUserDefaults.standardUserDefaults stringForKey:@"language"] isEqual:@"fa"] ? 1 : 0];
+    NSString *updateTitle = self.updater.availableVersion ?
+        [NSString stringWithFormat:@"Install %@ and restart", self.updater.availableVersion] : @"Check for Updates…";
+    self.updateButton.hidden = !self.updater.availableVersion;
+    self.updateButton.title = self.updater.installing ? @"Installing update…" : updateTitle;
+    self.settingsUpdate.title = self.updateButton.title;
+    self.updateButton.enabled = self.settingsUpdate.enabled = available && !self.updater.checking;
+    self.updateStatus.stringValue = self.updater.status;
+    self.updateButton.toolTip = self.updater.status;
+    if (self.updater.availableVersion && self.phase == Idle) {
+        self.detail.stringValue = self.updater.status;
+        if (self.updater.installing) self.headline.stringValue = @"Updating Sayso…";
+    }
     NSInteger pickerIndex = hasSelection ? self.selectedModel : modelCount;
     [self.modelPicker selectItemAtIndex:pickerIndex];
     [self.settingsPicker selectItemAtIndex:pickerIndex];
     self.downloadButton.hidden = !hasSelection || (installed && !downloading);
     BOOL resumable = hasSelection && !installed && [self partialSize] > 0;
     self.downloadButton.title = self.phase == Downloading ? @"Pause" : resumable ? @"Resume" : @"Download";
-    self.uninstallButton.enabled = self.phase == Idle;
-    self.downloadButton.enabled = self.phase == Idle || self.phase == Downloading;
-    self.modelLabel.stringValue = hasSelection
-        ? [NSString stringWithFormat:@"%@ · %s", downloading ? [NSString stringWithFormat:@"%.0f%%", 100 * self.downloadedFraction]
-            : installed ? @"On this Mac" : @"Multilingual", models[self.selectedModel].size]
-        : @"Downloaded models stay on this Mac when unloaded.";
+    self.uninstallButton.enabled = available;
+    self.downloadButton.enabled = available || self.phase == Downloading;
+    if (downloading) self.modelLabel.stringValue = [NSString stringWithFormat:@"%.0f%% · %s",
+        100 * self.downloadedFraction, models[self.selectedModel].size];
+    else if (hasSelection) {
+        NSString *description = PersianOnly(self.selectedModel) ? @"Persian dictation" :
+            @"Multilingual";
+        self.modelLabel.stringValue = [NSString stringWithFormat:@"%@ · %s%@", description,
+            models[self.selectedModel].size, installed ? @" · Installed" : @""];
+    } else self.modelLabel.stringValue = @"Choose a model to start dictating.";
     self.progress.hidden = !downloading;
     self.progress.doubleValue = self.downloadedFraction;
     self.popover.contentSize = NSMakeSize(380, ceil(self.page.fittingSize.height) + 32);
+    self.settingsDownload.hidden = self.downloadButton.hidden;
     self.settingsDownload.enabled = !self.downloadButton.hidden && self.downloadButton.enabled;
     self.settingsDownload.title = self.downloadButton.title;
-    self.unloadButton.enabled = hasSelection && self.phase == Idle;
-    self.removeButton.enabled = installed && self.phase == Idle;
+    self.unloadButton.enabled = hasSelection && available;
+    self.removeButton.enabled = installed && available;
     self.settingsModelStatus.stringValue = self.notice && (self.failed || !installed)
         ? self.notice : self.modelLabel.stringValue;
     self.settingsProgress.hidden = !downloading;
@@ -658,13 +756,14 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 }
 
 - (void)selectModel:(NSPopUpButton *)sender {
-    if (self.phase != Idle) return;
+    if (self.phase != Idle || self.updater.installing) return;
     NSInteger index = sender.indexOfSelectedItem;
     if (index < 0 || index > modelCount) return;
     [self activateModel:index == modelCount ? noModel : index];
 }
 
 - (void)activateModel:(NSInteger)index {
+    self.recognizer = nil;
     self.selectedModel = index;
     [NSUserDefaults.standardUserDefaults setInteger:self.selectedModel forKey:@"selectedModel"];
     self.notice = nil;
@@ -732,7 +831,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
         [self verifyDownload];
         return;
     }
-    NSString *address = [NSString stringWithFormat:@"%@/%s?download=true", modelOrigin, model.filename];
+    NSString *address = [NSString stringWithFormat:@"%@/%s?download=true", model.origin ? @(model.origin) : modelOrigin, model.filename];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:address]];
     request.timeoutInterval = 45;
     [request setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
@@ -876,10 +975,10 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 }
 
 - (void)uninstall:(id)sender {
-    if (self.phase != Idle) return;
+    if (self.phase != Idle || self.updater.installing) return;
     NSAlert *alert = [NSAlert new];
-    alert.messageText = @"Uninstall VoiceKey and delete its data?";
-    alert.informativeText = @"This permanently deletes VoiceKey’s models, partial downloads and preferences, removes its login item, and moves this copy of VoiceKey to Trash.";
+    alert.messageText = @"Uninstall Sayso and delete its data?";
+    alert.informativeText = @"This permanently deletes Sayso’s models, partial downloads and preferences, removes its login item, and moves this copy of Sayso to Trash.";
     [alert addButtonWithTitle:@"Cancel"];
     [alert addButtonWithTitle:@"Uninstall"];
     if ([alert runModal] != NSAlertSecondButtonReturn || self.phase != Idle) return;
@@ -907,166 +1006,217 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     [NSUserDefaults.standardUserDefaults removePersistentDomainForName:bundleID];
     [NSUserDefaults.standardUserDefaults synchronize];
     if (![files trashItemAtURL:NSBundle.mainBundle.bundleURL resultingItemURL:NULL error:&error]) {
-        [self displayError:[NSString stringWithFormat:@"Data removed. Move VoiceKey to Trash in Finder. %@", error.localizedDescription]];
+        [self displayError:[NSString stringWithFormat:@"Data removed. Move Sayso to Trash in Finder. %@", error.localizedDescription]];
         return;
     }
     [NSApp terminate:nil];
 }
 
 - (void)toggleRecording:(id)sender {
-    if (self.phase == Recording) {
-        [self finishRecording];
-        return;
-    }
-    if (self.phase != Idle || ![self modelExists]) {
-        [self showPopover];
-        return;
-    }
+    if (self.phase == Recording) { [self finishRecording]; return; }
+    if (self.phase != Idle || self.updater.installing) return;
+    if (![self modelExists]) { [self showPopover]; return; }
 
+    NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
+    self.destination = front.processIdentifier == NSRunningApplication.currentApplication.processIdentifier &&
+        self.popover.shown ? self.popoverDestination : front;
+    if (!AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)@{(__bridge NSString *)kAXTrustedCheckOptionPrompt: @YES})) {
+        [self displayError:@"Allow Sayso under Privacy & Security → Accessibility, then try the shortcut again."];
+        return;
+    }
+    if (!self.destination || self.destination.terminated ||
+        self.destination.processIdentifier == NSRunningApplication.currentApplication.processIdentifier) {
+        [self displayError:@"Click a text field in another app and press your dictation shortcut."];
+        return;
+    }
+    [self.popover performClose:nil];
+    self.phase = RequestingMicrophone;
+    [self refresh];
     AVAuthorizationStatus permission = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
-    switch (permission) {
-        case AVAuthorizationStatusAuthorized:
-            [self startRecording];
-            break;
-        case AVAuthorizationStatusNotDetermined: {
-            self.phase = RequestingMicrophone;
-            [self refresh];
-            [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    if (granted) [self startRecording];
-                    else [self displayError:@"Allow VoiceKey in System Settings → Privacy & Security → Microphone."];
-                });
-            }];
-            break;
-        }
-        case AVAuthorizationStatusDenied:
-            if (sender == self.recordButton) {
-                [NSWorkspace.sharedWorkspace openURL:
-                    [NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"]];
-            }
-            [self displayError:@"Allow VoiceKey in System Settings → Privacy & Security → Microphone."];
-            break;
-        case AVAuthorizationStatusRestricted:
-            [self displayError:@"Microphone access is restricted on this Mac."];
-            break;
+    if (permission == AVAuthorizationStatusAuthorized) {
+        [self prepareDestination];
+    } else if (permission == AVAuthorizationStatusNotDetermined) {
+        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (granted) [self prepareDestination];
+                else [self displayError:@"Allow Sayso under Privacy & Security → Microphone."];
+            });
+        }];
+    } else {
+        if (sender == self.recordButton && permission == AVAuthorizationStatusDenied)
+            [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:
+                @"x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"]];
+        [self displayError:@"Microphone access is unavailable. Check Privacy & Security → Microphone."];
     }
 }
 
+- (void)prepareDestination {
+    NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
+    if (front.processIdentifier == NSRunningApplication.currentApplication.processIdentifier)
+        [self.destination activateWithOptions:0];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (self.phase != RequestingMicrophone) return;
+        self.focusedElement = [self currentField];
+        if (![self destinationIsReady]) {
+            [self displayError:@"Click a regular text field in the destination app and start dictation again."];
+            return;
+        }
+        [self startRecording];
+    });
+}
+
+- (id)currentField {
+    AXUIElementRef app = AXUIElementCreateApplication(self.destination.processIdentifier);
+    CFTypeRef field = NULL;
+    AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute, &field);
+    CFRelease(app);
+    return CFBridgingRelease(field);
+}
+
+- (BOOL)destinationIsReady {
+    if (!AXIsProcessTrusted() || IsSecureEventInputEnabled() || self.destination.terminated ||
+        self.destination.processIdentifier != NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier) return NO;
+    id field = [self currentField];
+    if (self.focusedElement && ![self.focusedElement isEqual:field]) return NO;
+    if (field) {
+        CFTypeRef subrole = NULL;
+        AXUIElementCopyAttributeValue((__bridge AXUIElementRef)field, kAXSubroleAttribute, &subrole);
+        if ([CFBridgingRelease(subrole) isEqual:(__bridge NSString *)kAXSecureTextFieldSubrole]) return NO;
+    }
+    return YES;
+}
+
 - (void)startRecording {
-    NSFileManager *files = NSFileManager.defaultManager;
-    NSURL *folder = [files.temporaryDirectory
-        URLByAppendingPathComponent:[@"VoiceKey-" stringByAppendingString:NSUUID.UUID.UUIDString]
-                        isDirectory:YES];
+    if (!self.recognizer) {
+        NSString *language = PersianOnly(self.selectedModel) ? @"fa" :
+            [NSUserDefaults.standardUserDefaults stringForKey:@"language"];
+        self.recognizer = [[VKRecognizer alloc] initWithModel:self.modelURL language:language];
+    }
+    self.started = [NSDate date];
+    self.typedPhrase = NO;
+    self.failed = NO;
+    self.notice = nil;
+    self.capture = [PhraseCapture new];
+    __weak VoiceKey *app = self;
+    self.capture.phrase = ^(NSData *samples) {
+        [app.pending addObject:samples];
+        [app processNextPhrase];
+    };
+    NSUInteger generation = ++self.generation;
+    self.capture.interrupted = ^{
+        if (app.generation == generation && app.phase == Recording) {
+            app.notice = @"Microphone disconnected. Dictation stopped.";
+            [app finishRecording];
+        }
+    };
+    self.phase = Recording;
     NSError *error = nil;
-    if (![files createDirectoryAtURL:folder withIntermediateDirectories:NO
-                         attributes:@{NSFilePosixPermissions: @0700} error:&error]) {
+    if (![self.capture start:&error]) {
+        [self cancelCapture];
         [self displayError:error.localizedDescription];
         return;
     }
-    self.recordingFolder = folder;
-    NSDictionary *settings = @{AVFormatIDKey: @(kAudioFormatLinearPCM), AVSampleRateKey: @16000,
-        AVNumberOfChannelsKey: @1, AVLinearPCMBitDepthKey: @16, AVLinearPCMIsFloatKey: @NO};
-    AVAudioRecorder *recorder = [[AVAudioRecorder alloc] initWithURL:
-        [folder URLByAppendingPathComponent:@"recording.wav"] settings:settings error:&error];
-    recorder.delegate = self;
-    if (![recorder record]) {
-        [self cleanRecording];
-        [self displayError:error.localizedDescription ?: @"The microphone could not start recording."];
-        return;
-    }
-    self.recorder = recorder;
-    self.phase = Recording;
-    self.failed = NO;
-    self.notice = nil;
-    __weak VoiceKey *app = self;
-    self.timer = [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer) {
-        [app refresh];
+    self.timer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
+        if (app.destination.processIdentifier != NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier) {
+            [app cancelCapture];
+            [app displayError:@"Dictation stopped because the active app changed."];
+        } else [app refresh];
     }];
     [self refresh];
 }
 
-- (void)audioRecorderDidFinishRecording:(AVAudioRecorder *)recorder successfully:(BOOL)success {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.recorder != recorder || self.phase != Recording) return;
-        if (success) [self finishRecording];
-        else [self recordingFailed];
-    });
+- (BOOL)typePhrase:(NSString *)text {
+    if (![self destinationIsReady]) return NO;
+    NSString *output = text;
+    if (self.typedPhrase && ![[NSCharacterSet characterSetWithCharactersInString:@".,!?;:،؛؟…)]}"]
+        characterIsMember:[text characterAtIndex:0]]) output = [@" " stringByAppendingString:text];
+    pid_t pid = self.destination.processIdentifier;
+    __block BOOL sent = YES;
+    [output enumerateSubstringsInRange:NSMakeRange(0, output.length)
+        options:NSStringEnumerationByComposedCharacterSequences
+        usingBlock:^(NSString *character, NSRange range, NSRange enclosingRange, BOOL *stop) {
+        NSMutableData *units = [NSMutableData dataWithLength:character.length * sizeof(UniChar)];
+        [character getCharacters:units.mutableBytes range:NSMakeRange(0, character.length)];
+        CGEventRef down = CGEventCreateKeyboardEvent(NULL, 0, true);
+        CGEventRef up = CGEventCreateKeyboardEvent(NULL, 0, false);
+        if (down && up) {
+            CGEventSetFlags(down, 0);
+            CGEventSetFlags(up, 0);
+            CGEventKeyboardSetUnicodeString(down, character.length, units.bytes);
+            CGEventKeyboardSetUnicodeString(up, character.length, units.bytes);
+            CGEventPostToPid(pid, down);
+            CGEventPostToPid(pid, up);
+        } else { sent = NO; *stop = YES; }
+        if (down) CFRelease(down);
+        if (up) CFRelease(up);
+    }];
+    self.typedPhrase = YES;
+    return sent;
 }
 
-- (void)audioRecorderEncodeErrorDidOccur:(AVAudioRecorder *)recorder error:(NSError *)error {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.recorder != recorder || self.phase != Recording) return;
-        [self recordingFailed];
-    });
-}
-
-- (void)recordingFailed {
-    AVAudioRecorder *recorder = self.recorder;
-    self.recorder = nil;
-    [recorder stop];
-    [self cleanRecording];
-    [self displayError:@"The recording was interrupted. Check the microphone and start again."];
-}
-
-- (void)cleanRecording {
-    [self.timer invalidate];
-    self.timer = nil;
-    if (self.recordingFolder) [NSFileManager.defaultManager removeItemAtURL:self.recordingFolder error:NULL];
-    self.recordingFolder = nil;
-}
-
-- (void)finishRecording {
-    AVAudioRecorder *recorder = self.recorder;
-    self.recorder = nil;
-    [recorder stop];
-    [self.timer invalidate];
-    self.timer = nil;
-    self.phase = Transcribing;
-    [self refresh];
-
-    NSURL *audio = recorder.url;
-    NSURL *model = [self modelURL];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSError *error = nil;
-        NSString *text = VKTranscribe(audio, model, &error);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self cleanRecording];
+- (void)processNextPhrase {
+    if (self.decoding) {
+        NSUInteger bytes = 0;
+        for (NSData *phrase in self.pending) bytes += phrase.length;
+        if (self.phase == Recording && bytes > 30 * 16000 * sizeof(float)) {
+            self.notice = @"Dictation stopped to finish queued speech. Choose a smaller model for lower latency.";
+            dispatch_async(dispatch_get_main_queue(), ^{ if (self.phase == Recording) [self finishRecording]; });
+        }
+        return;
+    }
+    NSData *samples = self.pending.firstObject;
+    if (!samples) {
+        if (self.phase == Transcribing) {
             self.phase = Idle;
-            if (!text) {
-                [self displayError:error.localizedDescription ?: @"The recording could not be read."];
+            if (!self.notice) self.notice = self.typedPhrase ? @"Dictation finished." : @"No speech detected.";
+            self.destination = nil;
+            self.focusedElement = nil;
+            [self updateChanged];
+        }
+        return;
+    }
+    [self.pending removeObjectAtIndex:0];
+    self.decoding = YES;
+    VKRecognizer *recognizer = self.recognizer;
+    NSUInteger generation = self.generation;
+    dispatch_async(self.recognitionQueue, ^{
+        NSError *error = nil;
+        NSString *text = [recognizer recognize:samples.bytes count:samples.length / sizeof(float) error:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != self.generation) return;
+            self.decoding = NO;
+            if (!text || (text.length && ![self typePhrase:text])) {
+                [self cancelCapture];
+                [self displayError:error.localizedDescription ?: @"Typing stopped. Return to your text field and start dictation again."];
                 return;
             }
-            if (text.length == 0) {
-                self.notice = @"No speech was detected. Try another recording.";
-                [self refresh];
-                [self showPopover];
-                return;
-            }
-            self.transcript = text;
-            self.transcriptView.string = text;
-            self.transcriptView.font = [NSFont systemFontOfSize:13];
-            self.transcriptView.textColor = NSColor.textColor;
-            [self.transcriptView scrollRangeToVisible:NSMakeRange(0, 0)];
-            if (self.autoCopy) {
-                [self copyTranscript:nil];
-            } else {
-                self.notice = @"Transcript ready. Use Copy to put it on the clipboard.";
-                [self refresh];
-            }
+            [self processNextPhrase];
         });
     });
 }
 
-- (void)copyTranscript:(id)sender {
-    if (self.transcript.length == 0) return;
-    NSPasteboard *clipboard = NSPasteboard.generalPasteboard;
-    [clipboard clearContents];
-    BOOL copied = [clipboard setString:self.transcript forType:NSPasteboardTypeString];
-    if (self.phase == Idle) {
-        self.notice = copied ? @"Transcript copied. Press ⌘V to paste." : @"Select the transcript below to copy it.";
-        self.failed = NO;
-        [self refresh];
-    }
+- (void)cancelCapture {
+    self.generation++;
+    self.capture.phrase = nil;
+    [self.capture stop];
+    self.capture = nil;
+    [self.timer invalidate];
+    self.timer = nil;
+    [self.pending removeAllObjects];
+    self.decoding = NO;
+    self.focusedElement = nil;
+    self.destination = nil;
+}
+
+- (void)finishRecording {
+    // Stop input first, including the partial phrase, then drain in capture order.
+    self.phase = Transcribing;
+    [self.timer invalidate];
+    self.timer = nil;
+    [self.capture stop];
+    self.capture = nil;
+    [self refresh];
+    [self processNextPhrase];
 }
 
 @end
@@ -1087,7 +1237,7 @@ int main(int argc, const char *argv[]) {
         }
         NSApplication *application = NSApplication.sharedApplication;
         [application setActivationPolicy:NSApplicationActivationPolicyAccessory];
-        VoiceKey *delegate = [VoiceKey new];
+        __attribute__((objc_precise_lifetime)) VoiceKey *delegate = [VoiceKey new];
         application.delegate = delegate;
         [application run];
     }
