@@ -30,7 +30,11 @@ static const Model models[] = {
      "https://huggingface.co/armantee/whisper-base-persian-ggml/resolve/ea634cb5f241db4234de61cec5353c356868c88e"},
     {"Nava · فارسی", "574 MB", "ggml-nava-q5_0.bin", 574041195,
      "e788c333480c50fbde2e4c7c145a46f90fed6e055892c9d81582a6d11af84b0f",
-     "https://huggingface.co/Nimruz/Nava-ggml/resolve/b4cc11c89fe8ec82619c8b4f97d1ea60c40ae6aa"}
+     "https://huggingface.co/Nimruz/Nava-ggml/resolve/b4cc11c89fe8ec82619c8b4f97d1ea60c40ae6aa"},
+    {"Whisper Tiny · Compact", "32 MB", "ggml-tiny-q5_1.bin", 32152673,
+     "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7", NULL},
+    {"Whisper Tiny", "78 MB", "ggml-tiny.bin", 77691713,
+     "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21", NULL}
 };
 static const NSInteger modelCount = sizeof(models) / sizeof(models[0]);
 static const NSInteger persianBase = 4;
@@ -103,6 +107,15 @@ static NSImage *Symbol(NSString *name, NSString *description, CGFloat size) {
 
 @interface VoiceKey : NSObject <NSApplicationDelegate, NSWindowDelegate, NSURLSessionDataDelegate>
 @property Phase phase;
+@property NSInteger mode;
+@property BOOL holding;
+@property double shiftDown;
+@property double lastTap;
+@property (strong) id shiftMonitor;
+@property (strong) NSTimer *shiftTimer;
+@property (strong) NSPopUpButton *modePicker;
+@property (strong) NSButton *checkButton;
+- (void)shortcutEdge:(BOOL)pressed;
 @property NSInteger selectedModel;
 @property OSStatus shortcutStatus;
 @property EventHotKeyRef hotKey;
@@ -176,7 +189,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     if (result != noErr || identifier.signature != 0x564b4559 || identifier.id != app.shortcutID) {
         return eventNotHandledErr;
     }
-    if (!app.shortcutButton.capture) [app toggleRecording:nil];
+    if (!app.shortcutButton.capture) [app shortcutEdge:GetEventKind(event) == kEventHotKeyPressed];
     return noErr;
 }
 
@@ -185,7 +198,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     [defaults registerDefaults:@{@"shortcutKey": @(kVK_Space), @"shortcutModifiers": @(optionKey | shiftKey),
-                                 @"shortcutTitle": defaultShortcut, @"language": @"auto"}];
+                                 @"shortcutTitle": defaultShortcut, @"language": @"auto", @"recordingSounds": @YES}];
     NSInteger saved = [defaults integerForKey:@"selectedModel"];
     if ([defaults objectForKey:@"selectedModel"] && ![defaults boolForKey:@"removedTinyModels"]) {
         if (saved == 2 || saved == 6) saved = persianBase;
@@ -206,10 +219,12 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.statusItem.button.action = @selector(togglePopover:);
     [self buildPopover];
 
-    const EventTypeSpec event = {kEventClassKeyboard, kEventHotKeyReleased};
+    self.mode = [defaults integerForKey:@"recordingMode"];
+    [self configureShift];
+    const EventTypeSpec events[] = {{kEventClassKeyboard, kEventHotKeyPressed}, {kEventClassKeyboard, kEventHotKeyReleased}};
     self.shortcutStatus = InstallEventHandler(GetApplicationEventTarget(), ShortcutReleased,
-        1, &event, (__bridge void *)self, &_hotKeyHandler);
-    if (self.shortcutStatus == noErr) {
+        2, events, (__bridge void *)self, &_hotKeyHandler);
+    if (self.shortcutStatus == noErr && self.mode < 2) {
         self.shortcutID = 1;
         const EventHotKeyID identifier = {0x564b4559, self.shortcutID};
         self.shortcutStatus = RegisterEventHotKey(self.shortcutKey, self.shortcutModifiers, identifier,
@@ -237,6 +252,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
+    if (self.shiftMonitor) [NSEvent removeMonitor:self.shiftMonitor];
     if (self.hotKey) UnregisterEventHotKey(self.hotKey);
     if (self.hotKeyHandler) RemoveEventHandler(self.hotKeyHandler);
     [self.retryTimer invalidate];
@@ -312,6 +328,97 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     [self.settingsWindow makeKeyAndOrderFront:sender];
 }
 
+// 0 toggles the configured chord, 1 holds it, 2 holds Shift, 3 double-taps Shift.
+- (void)shortcutEdge:(BOOL)pressed {
+    if (self.mode >= 2) return;
+    if (self.mode == 0) {
+        if (!pressed) [self toggleRecording:nil];
+    } else [self holdEdge:pressed];
+}
+
+- (void)holdEdge:(BOOL)pressed {
+    if (pressed && self.phase == Idle && !self.holding) {
+        self.holding = YES;
+        [self toggleRecording:nil];
+    } else if (!pressed && self.holding) {
+        self.holding = NO;
+        if (self.phase == Recording) [self finishRecording];
+        else if (self.phase == RequestingMicrophone) {
+            self.generation++;
+            self.phase = Idle;
+            [self refresh];
+        }
+    }
+}
+
+- (void)configureShift {
+    if (self.shiftMonitor) [NSEvent removeMonitor:self.shiftMonitor];
+    self.shiftMonitor = nil;
+    [self.shiftTimer invalidate];
+    self.shiftDown = self.lastTap = 0;
+    if (self.mode < 2) return;
+    __weak VoiceKey *weakSelf = self;
+    self.shiftMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskFlagsChanged | NSEventMaskKeyDown
+        handler:^(NSEvent *event) { [weakSelf shiftEvent:event]; }];
+}
+
+- (void)shiftEvent:(NSEvent *)event {
+    NSEventModifierFlags flags = event.modifierFlags;
+    if (self.holding && !CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, kVK_Shift))
+        [self holdEdge:NO];
+    if (event.type != NSEventTypeFlagsChanged || event.keyCode != kVK_Shift ||
+        (flags & (NSEventModifierFlagControl | NSEventModifierFlagCommand | NSEventModifierFlagOption))) {
+        [self.shiftTimer invalidate];
+        self.shiftDown = self.lastTap = 0;
+        return;
+    }
+    if (CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, kVK_Shift)) {
+        self.shiftDown = event.timestamp;
+        if (self.mode == 2) {
+            [self.shiftTimer invalidate];
+            self.shiftTimer = [NSTimer scheduledTimerWithTimeInterval:0.35 repeats:NO block:^(NSTimer *timer) {
+                [self holdEdge:YES];
+            }];
+        }
+    } else {
+        [self.shiftTimer invalidate];
+        if (self.mode == 2) [self holdEdge:NO];
+        else if (self.shiftDown && event.timestamp - self.shiftDown < 0.3) {
+            if (self.lastTap && event.timestamp - self.lastTap <= NSEvent.doubleClickInterval) {
+                self.lastTap = 0;
+                [self toggleRecording:nil];
+            } else self.lastTap = event.timestamp;
+        } else self.lastTap = 0;
+        self.shiftDown = 0;
+    }
+}
+
+- (void)changeMode:(NSPopUpButton *)sender {
+    self.mode = sender.indexOfSelectedItem;
+    [NSUserDefaults.standardUserDefaults setInteger:self.mode forKey:@"recordingMode"];
+    if (self.mode >= 2 && self.hotKey) {
+        UnregisterEventHotKey(self.hotKey);
+        self.hotKey = NULL;
+    } else if (self.mode < 2 && !self.hotKey) {
+        EventHotKeyID identifier = {0x564b4559, ++_shortcutID};
+        self.shortcutStatus = RegisterEventHotKey(self.shortcutKey, self.shortcutModifiers, identifier,
+            GetApplicationEventTarget(), kEventHotKeyExclusive, &_hotKey);
+    }
+    [self configureShift];
+    [self refresh];
+}
+
+- (void)soundSetting:(NSButton *)sender {
+    [NSUserDefaults.standardUserDefaults setBool:sender.state == NSControlStateValueOn forKey:@"recordingSounds"];
+}
+
+- (void)cue:(NSString *)name {
+    if (![NSUserDefaults.standardUserDefaults boolForKey:@"recordingSounds"]) return;
+    NSSound *sound = [NSSound soundNamed:name];
+    sound.volume = 0.13;
+    [sound play];
+}
+
 - (void)buildSettings {
     NSColor *primary = NSColor.labelColor;
     NSColor *secondary = NSColor.secondaryLabelColor;
@@ -363,29 +470,46 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     NSTextField *modelsHeading = Label(@"Local models", 14, NSFontWeightSemibold, primary);
     NSTextField *generalHeading = Label(@"General", 14, NSFontWeightSemibold, primary);
     self.uninstallButton = [self button:@"Uninstall Sayso…" action:@selector(uninstall:)];
-    NSStackView *body = Stack(NSUserInterfaceLayoutOrientationVertical,
-        @[shortcutHeading, shortcutRow, self.shortcutMessage, modelsHeading, modelRow, languageRow, self.settingsModelStatus,
-          self.settingsProgress, generalHeading, loginRow, self.loginMessage, self.settingsUpdate, self.updateStatus, self.uninstallButton], 7);
-    body.alignment = NSLayoutAttributeLeading;
-    [body setCustomSpacing:18 afterView:self.shortcutMessage];
-    [body setCustomSpacing:15 afterView:self.settingsProgress];
+    self.modePicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.modePicker addItemsWithTitles:@[@"Toggle with shortcut", @"Hold shortcut to talk", @"Hold left Shift to talk", @"Double-tap left Shift to toggle"]];
+    [self.modePicker selectItemAtIndex:self.mode];
+    self.modePicker.target = self;
+    self.modePicker.action = @selector(changeMode:);
+    NSButton *sounds = [NSButton checkboxWithTitle:@"Play soft recording sounds" target:self action:@selector(soundSetting:)];
+    sounds.state = [NSUserDefaults.standardUserDefaults boolForKey:@"recordingSounds"];
+    self.checkButton = [self button:@"Check for Updates…" action:@selector(checkUpdates:)];
+    NSStackView *updates = Stack(NSUserInterfaceLayoutOrientationHorizontal, @[self.checkButton, self.settingsUpdate], 8);
+    NSTabView *tabs = [NSTabView new];
+    NSArray *groups = @[@[shortcutHeading, self.modePicker, shortcutRow, self.shortcutMessage, sounds],
+                        @[modelsHeading, modelRow, languageRow, self.settingsModelStatus, self.settingsProgress],
+                        @[generalHeading, loginRow, self.loginMessage, updates, self.updateStatus, self.uninstallButton]];
+    NSArray *titles = @[@"Recording", @"Models", @"General"];
+    for (NSUInteger i = 0; i < groups.count; i++) {
+        NSTabViewItem *tab = [[NSTabViewItem alloc] initWithIdentifier:titles[i]];
+        tab.label = titles[i];
+        NSStackView *section = Stack(NSUserInterfaceLayoutOrientationVertical, groups[i], 12);
+        section.alignment = NSLayoutAttributeLeading;
+        section.translatesAutoresizingMaskIntoConstraints = NO;
+        tab.view = [NSView new];
+        [tab.view addSubview:section];
+        [section.leadingAnchor constraintEqualToAnchor:tab.view.leadingAnchor constant:18].active = YES;
+        [section.topAnchor constraintEqualToAnchor:tab.view.topAnchor constant:16].active = YES;
+        [tabs addTabViewItem:tab];
+    }
     for (NSView *fullWidth in @[self.settingsModelStatus, self.settingsProgress, self.loginMessage, self.updateStatus]) {
         [fullWidth.widthAnchor constraintEqualToConstant:510].active = YES;
     }
 
-    self.settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 560, 470)
+    self.settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 660, 340)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
         backing:NSBackingStoreBuffered defer:NO];
     self.settingsWindow.title = @"Sayso Settings";
     self.settingsWindow.releasedWhenClosed = NO;
     self.settingsWindow.delegate = self;
     NSView *content = self.settingsWindow.contentView;
-    body.translatesAutoresizingMaskIntoConstraints = NO;
-    [content addSubview:body];
-    [NSLayoutConstraint activateConstraints:@[
-        [body.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:22],
-        [body.topAnchor constraintEqualToAnchor:content.topAnchor constant:21]
-    ]];
+    tabs.frame = NSInsetRect(content.bounds, 12, 10);
+    tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [content addSubview:tabs];
     [self.settingsWindow center];
 }
 
@@ -692,6 +816,14 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 
     NSString *menuDescription = self.phase == Recording ? @"Sayso, listening. Click to stop dictation." :
                                 self.phase == Transcribing ? @"Sayso, transcribing" : @"Sayso";
+    NSStatusBarButton *indicator = self.statusItem.button;
+    if (self.phase == Recording && !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
+        CGFloat opacity = ((NSInteger)(-self.started.timeIntervalSinceNow * 2) % 2) ? 0.55 : 1;
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+            context.duration = 0.42;
+            indicator.animator.alphaValue = opacity;
+        } completionHandler:nil];
+    } else indicator.animator.alphaValue = 1;
     self.statusItem.button.image = Symbol(menuSymbol, menuDescription, 14);
     self.statusItem.button.toolTip = menuDescription;
     [self.statusItem.button setAccessibilityLabel:menuDescription];
@@ -700,9 +832,9 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.stateImage.contentTintColor = tint;
     self.headline.stringValue = title;
     self.detail.stringValue = subtitle;
-    self.keyLabel.stringValue = self.shortcutStatus == noErr ? self.shortcutTitle : @"";
+    self.keyLabel.stringValue = self.mode == 2 ? @"Hold left Shift" : self.mode == 3 ? @"Double-tap left Shift" : self.shortcutStatus == noErr ? self.shortcutTitle : @"";
     [self.keyLabel setAccessibilityLabel:[@"Global shortcut " stringByAppendingString:self.shortcutTitle]];
-    self.keyLabel.hidden = self.shortcutStatus != noErr;
+    self.keyLabel.hidden = self.mode < 2 && self.shortcutStatus != noErr;
 
     self.recordButton.title = self.phase == Recording ? @"Stop dictation" :
                               denied ? @"Microphone Settings" : !AXIsProcessTrusted() ? @"Enable keyboard access…" : @"Start dictation";
@@ -718,6 +850,12 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.updateButton.hidden = !self.updater.availableVersion;
     self.updateButton.title = self.updater.installing ? @"Installing update…" : updateTitle;
     self.settingsUpdate.title = self.updateButton.title;
+    self.settingsUpdate.hidden = !self.updater.availableVersion;
+    self.checkButton.enabled = available && !self.updater.checking;
+    self.checkButton.title = self.updater.checking ? @"Checking…" : @"Check for Updates…";
+    self.modePicker.enabled = available;
+    self.shortcutButton.superview.hidden = self.mode >= 2;
+    self.shortcutMessage.hidden = self.mode >= 2;
     self.updateButton.enabled = self.settingsUpdate.enabled = available && !self.updater.checking;
     self.updateStatus.stringValue = self.updater.status;
     self.updateButton.toolTip = self.updater.status;
@@ -1033,11 +1171,13 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.phase = RequestingMicrophone;
     [self refresh];
     AVAuthorizationStatus permission = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    NSUInteger request = ++self.generation;
     if (permission == AVAuthorizationStatusAuthorized) {
         [self prepareDestination];
     } else if (permission == AVAuthorizationStatusNotDetermined) {
         [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
             dispatch_async(dispatch_get_main_queue(), ^{
+                if (self.generation != request || self.phase != RequestingMicrophone) return;
                 if (granted) [self prepareDestination];
                 else [self displayError:@"Allow Sayso under Privacy & Security → Microphone."];
             });
@@ -1054,8 +1194,9 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
     if (front.processIdentifier == NSRunningApplication.currentApplication.processIdentifier)
         [self.destination activateWithOptions:0];
+    NSUInteger request = self.generation;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-        if (self.phase != RequestingMicrophone) return;
+        if (self.phase != RequestingMicrophone || request != self.generation) return;
         self.focusedElement = [self currentField];
         if (![self destinationIsReady]) {
             [self displayError:@"Click a regular text field in the destination app and start dictation again."];
@@ -1116,6 +1257,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
         [self displayError:error.localizedDescription];
         return;
     }
+    [self cue:@"Pop"];
     self.timer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
         if (app.destination.processIdentifier != NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier) {
             [app cancelCapture];
@@ -1209,11 +1351,13 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 }
 
 - (void)finishRecording {
+    self.holding = NO;
     // Stop input first, including the partial phrase, then drain in capture order.
     self.phase = Transcribing;
     [self.timer invalidate];
     self.timer = nil;
     [self.capture stop];
+    [self cue:@"Tink"];
     self.capture = nil;
     [self refresh];
     [self processNextPhrase];
