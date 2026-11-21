@@ -10,4 +10,4 @@ Sayso is a macOS menu bar app for dictation. It uses whisper.cpp to detect the s
 
 ## Build from source
 
-Install the Xcode Command Line Tools and run `./build.sh`. The script builds an ad hoc-signed app and bundles [whisper.cpp v1.8.4](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.8.4).
+Install the Xcode Command Line Tools and run `bash build.sh`. The script builds an ad hoc-signed app and bundles [whisper.cpp v1.8.4](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.8.4).
