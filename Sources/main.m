@@ -4,6 +4,8 @@
 #import <ServiceManagement/ServiceManagement.h>
 #import "WhisperEngine.h"
 #import "PhraseCapture.h"
+#import "RecordingIndicator.h"
+#import "ShortcutGesture.h"
 #import "ReleaseUpdater.h"
 #import <ApplicationServices/ApplicationServices.h>
 
@@ -16,33 +18,44 @@ typedef struct {
     const char *origin;
 } Model;
 
+enum { noModel = -1, whisperTurbo, nava };
 static const Model models[] = {
-    {"Whisper Large v3 Turbo", "574 MB", "ggml-large-v3-turbo-q5_0.bin", 574041195,
+    [whisperTurbo] = {"Whisper Large v3 Turbo", "574 MB", "ggml-large-v3-turbo-q5_0.bin", 574041195,
      "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2", NULL},
-    {"Whisper Base", "60 MB", "ggml-base-q5_1.bin", 59707625,
-     "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898", NULL},
-    {"Whisper Small", "190 MB", "ggml-small-q5_1.bin", 190085487,
-     "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb", NULL},
-    {"Whisper Medium", "539 MB", "ggml-medium-q5_0.bin", 539212467,
-     "19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f", NULL},
-    {"Persian Base · فارسی", "82 MB", "ggml-base-persian-q8_0.bin", 81768602,
-     "a8bcb0746be5c9741ba8d1c87c89cccb6fa1452e7878275071f5165a7c43f4a7",
-     "https://huggingface.co/armantee/whisper-base-persian-ggml/resolve/ea634cb5f241db4234de61cec5353c356868c88e"},
-    {"Nava · فارسی", "574 MB", "ggml-nava-q5_0.bin", 574041195,
+    [nava] = {"Nava · فارسی", "574 MB", "ggml-nava-q5_0.bin", 574041195,
      "e788c333480c50fbde2e4c7c145a46f90fed6e055892c9d81582a6d11af84b0f",
-     "https://huggingface.co/Nimruz/Nava-ggml/resolve/b4cc11c89fe8ec82619c8b4f97d1ea60c40ae6aa"},
-    {"Whisper Tiny · Compact", "32 MB", "ggml-tiny-q5_1.bin", 32152673,
-     "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7", NULL},
-    {"Whisper Tiny", "78 MB", "ggml-tiny.bin", 77691713,
-     "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21", NULL}
+     "https://huggingface.co/Nimruz/Nava-ggml/resolve/b4cc11c89fe8ec82619c8b4f97d1ea60c40ae6aa"}
 };
 static const NSInteger modelCount = sizeof(models) / sizeof(models[0]);
-static const NSInteger persianBase = 4;
-static BOOL PersianOnly(NSInteger index) { return index == persianBase || index == 5; }
-static const NSInteger noModel = -1;
+static BOOL PersianOnly(NSInteger index) { return index == nava; }
+static NSString *const selectedModelKey = @"selectedModelFilename";
+static const int64_t dictationEventTag = 0x564b4559;
 static NSString *const defaultShortcut = @"⌥⇧Space";
 static NSString *const modelOrigin =
     @"https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1";
+
+static NSInteger LoadSelectedModel(NSUserDefaults *defaults) {
+    NSString *filename = [defaults stringForKey:selectedModelKey];
+    if (filename) {
+        if (filename.length == 0) return noModel;
+        for (NSInteger i = 0; i < modelCount; i++) {
+            if ([filename isEqualToString:@(models[i].filename)]) return i;
+        }
+        return whisperTurbo;
+    }
+
+    NSInteger model = [defaults boolForKey:@"hasLaunched"] ? whisperTurbo : nava;
+    if ([defaults objectForKey:@"selectedModel"]) {
+        NSInteger previous = [defaults integerForKey:@"selectedModel"];
+        BOOL usesRecentOrder = [defaults boolForKey:@"removedTinyModels"];
+        // Persian Base and Nava moved one slot when the original Tiny entry was removed.
+        NSInteger previousPersianBase = usesRecentOrder ? 4 : 5;
+        if (previous == noModel) model = noModel;
+        else model = (previous == previousPersianBase || previous == previousPersianBase + 1) ? nava : whisperTurbo;
+    }
+    [defaults setObject:model == noModel ? @"" : @(models[model].filename) forKey:selectedModelKey];
+    return model;
+}
 
 typedef NS_ENUM(NSUInteger, Phase) {
     Idle, Downloading, CancelingDownload, Verifying, RequestingMicrophone, Recording, Transcribing
@@ -69,15 +82,50 @@ static NSImage *Symbol(NSString *name, NSString *description, CGFloat size) {
                                                                                                weight:NSFontWeightMedium]];
 }
 
+static UInt32 ShortcutModifiers(NSEventModifierFlags flags) {
+    return ((flags & NSEventModifierFlagCommand) ? cmdKey : 0) |
+           ((flags & NSEventModifierFlagOption) ? optionKey : 0) |
+           ((flags & NSEventModifierFlagControl) ? controlKey : 0) |
+           ((flags & NSEventModifierFlagShift) ? shiftKey : 0);
+}
+
+static UInt32 ModifierForKey(UInt32 key) {
+    switch (key) {
+        case kVK_Command: case kVK_RightCommand: return cmdKey;
+        case kVK_Shift: case kVK_RightShift: return shiftKey;
+        case kVK_Option: case kVK_RightOption: return optionKey;
+        case kVK_Control: case kVK_RightControl: return controlKey;
+        default: return 0;
+    }
+}
+
+static NSString *ShortcutProblem(UInt32 key, UInt32 mods, NSString *title, GestureKind gesture) {
+    if (!mods) return @"Include Command, Option, Control, or Shift.";
+    if (gesture != TapGesture) return nil;
+    if (ModifierForKey(key) && !(mods & (mods - 1)))
+        return @"Tap needs a combination. Use Hold or Double tap for a single modifier.";
+    if (mods == shiftKey && [title hasPrefix:@"⇧"]) {
+        NSString *name = [title substringFromIndex:1];
+        if (name.length && NSEqualRanges([name rangeOfComposedCharacterSequenceAtIndex:0], NSMakeRange(0, name.length)) &&
+            [name rangeOfCharacterFromSet:NSCharacterSet.letterCharacterSet].location != NSNotFound)
+            return @"Shift with a letter is reserved for typing capitals. Add another modifier.";
+    }
+    return nil;
+}
+
 @interface ShortcutButton : NSButton
 @property (copy) void (^capture)(NSEvent *event);
 @property (strong) NSEvent *capturedKeyDown;
+@property (strong) NSEvent *capturedModifiers;
+@property BOOL usedRegularKey;
 @end
 
 @implementation ShortcutButton
 - (BOOL)acceptsFirstResponder { return YES; }
 - (void)keyDown:(NSEvent *)event {
     if (self.capture) {
+        self.usedRegularKey = YES;
+        self.capturedModifiers = nil;
         if (!event.isARepeat) self.capturedKeyDown = event;
     }
     else [super keyDown:event];
@@ -97,6 +145,18 @@ static NSImage *Symbol(NSString *name, NSString *description, CGFloat size) {
         }
     } else [super keyUp:event];
 }
+- (void)flagsChanged:(NSEvent *)event {
+    if (!self.capture) { [super flagsChanged:event]; return; }
+    UInt32 flags = ShortcutModifiers(event.modifierFlags);
+    if (!flags) {
+        NSEvent *candidate = self.capturedModifiers;
+        self.capturedModifiers = nil;
+        self.usedRegularKey = NO;
+        if (candidate) self.capture(candidate);
+    } else if (!self.usedRegularKey && (flags & ModifierForKey(event.keyCode))) {
+        self.capturedModifiers = event;
+    }
+}
 - (BOOL)resignFirstResponder {
     self.capturedKeyDown = nil;
     void (^capture)(NSEvent *) = self.capture;
@@ -107,15 +167,20 @@ static NSImage *Symbol(NSString *name, NSString *description, CGFloat size) {
 
 @interface VoiceKey : NSObject <NSApplicationDelegate, NSWindowDelegate, NSURLSessionDataDelegate>
 @property Phase phase;
-@property NSInteger mode;
+@property (strong) ShortcutGesture *gesture;
 @property BOOL holding;
-@property double shiftDown;
-@property double lastTap;
-@property (strong) id shiftMonitor;
-@property (strong) NSTimer *shiftTimer;
+@property BOOL modifierBlocked;
+@property (strong) NSMutableIndexSet *pressedKeys;
+@property (strong) id globalMonitor;
+@property (strong) id localMonitor;
 @property (strong) NSPopUpButton *modePicker;
+@property (strong) NSPopUpButton *gesturePicker;
+@property (strong) NSButton *resetButton;
+@property (strong) RecordingIndicator *indicator;
+@property BOOL shortcutSession;
+@property Phase indicatorPhase;
 @property (strong) NSButton *checkButton;
-- (void)shortcutEdge:(BOOL)pressed;
+
 @property NSInteger selectedModel;
 @property OSStatus shortcutStatus;
 @property EventHotKeyRef hotKey;
@@ -189,7 +254,8 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     if (result != noErr || identifier.signature != 0x564b4559 || identifier.id != app.shortcutID) {
         return eventNotHandledErr;
     }
-    if (!app.shortcutButton.capture) [app shortcutEdge:GetEventKind(event) == kEventHotKeyPressed];
+    if (!app.shortcutButton.capture && app.hotKey)
+        [app.gesture edge:GetEventKind(event) == kEventHotKeyPressed at:GetEventTime(event)];
     return noErr;
 }
 
@@ -199,37 +265,38 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     [defaults registerDefaults:@{@"shortcutKey": @(kVK_Space), @"shortcutModifiers": @(optionKey | shiftKey),
                                  @"shortcutTitle": defaultShortcut, @"language": @"auto", @"recordingSounds": @YES}];
-    NSInteger saved = [defaults integerForKey:@"selectedModel"];
-    if ([defaults objectForKey:@"selectedModel"] && ![defaults boolForKey:@"removedTinyModels"]) {
-        if (saved == 2 || saved == 6) saved = persianBase;
-        else if (saved >= 3 && saved <= 5) saved--;
-        [defaults setInteger:saved forKey:@"selectedModel"];
-    }
-    [defaults setBool:YES forKey:@"removedTinyModels"];
-    self.selectedModel = [defaults objectForKey:@"selectedModel"] && saved >= noModel && saved < modelCount
-        ? saved : [defaults boolForKey:@"hasLaunched"] ? 0 : persianBase;
+    self.selectedModel = LoadSelectedModel(defaults);
     self.recognitionQueue = dispatch_queue_create("sayso.recognition", DISPATCH_QUEUE_SERIAL);
     self.pending = [NSMutableArray array];
     self.updater = [ReleaseUpdater new];
-    self.shortcutKey = (UInt32)[defaults integerForKey:@"shortcutKey"];
-    self.shortcutModifiers = (UInt32)[defaults integerForKey:@"shortcutModifiers"];
-    self.shortcutTitle = [defaults stringForKey:@"shortcutTitle"];
     self.statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSSquareStatusItemLength];
     self.statusItem.button.target = self;
     self.statusItem.button.action = @selector(togglePopover:);
     [self buildPopover];
 
-    self.mode = [defaults integerForKey:@"recordingMode"];
-    [self configureShift];
+    self.indicator = [RecordingIndicator new];
+    self.gesture = [ShortcutGesture new];
+    [self loadShortcutSettings:defaults];
+    [self saveShortcutSettings];
+    __weak VoiceKey *owner = self;
+    self.gesture.activate = ^{
+        VoiceKey *app = owner;
+        if (app.gesture.mode == HoldRecording) [app holdEdge:YES];
+        else [app toggleRecording:nil];
+    };
+    self.gesture.releaseHold = ^{ [owner holdEdge:NO]; };
     const EventTypeSpec events[] = {{kEventClassKeyboard, kEventHotKeyPressed}, {kEventClassKeyboard, kEventHotKeyReleased}};
-    self.shortcutStatus = InstallEventHandler(GetApplicationEventTarget(), ShortcutReleased,
-        2, events, (__bridge void *)self, &_hotKeyHandler);
-    if (self.shortcutStatus == noErr && self.mode < 2) {
-        self.shortcutID = 1;
-        const EventHotKeyID identifier = {0x564b4559, self.shortcutID};
-        self.shortcutStatus = RegisterEventHotKey(self.shortcutKey, self.shortcutModifiers, identifier,
-            GetApplicationEventTarget(), kEventHotKeyExclusive, &_hotKey);
-    }
+    InstallEventHandler(GetApplicationEventTarget(), ShortcutReleased, 2, events, (__bridge void *)self, &_hotKeyHandler);
+    self.shortcutStatus = [self registerKey:self.shortcutKey modifiers:self.shortcutModifiers];
+    self.pressedKeys = [NSMutableIndexSet indexSet];
+    NSEventMask mask = NSEventMaskFlagsChanged | NSEventMaskKeyDown | NSEventMaskKeyUp;
+    self.globalMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:mask handler:^(NSEvent *event) {
+        [owner observeShortcut:event];
+    }];
+    self.localMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:mask handler:^NSEvent *(NSEvent *event) {
+        [owner observeShortcut:event];
+        return event;
+    }];
 
     NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
     configuration.URLCache = nil;
@@ -252,7 +319,9 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
-    if (self.shiftMonitor) [NSEvent removeMonitor:self.shiftMonitor];
+    [self.gesture cancel];
+    if (self.globalMonitor) [NSEvent removeMonitor:self.globalMonitor];
+    if (self.localMonitor) [NSEvent removeMonitor:self.localMonitor];
     if (self.hotKey) UnregisterEventHotKey(self.hotKey);
     if (self.hotKeyHandler) RemoveEventHandler(self.hotKeyHandler);
     [self.retryTimer invalidate];
@@ -328,14 +397,6 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     [self.settingsWindow makeKeyAndOrderFront:sender];
 }
 
-// 0 toggles the configured chord, 1 holds it, 2 holds Shift, 3 double-taps Shift.
-- (void)shortcutEdge:(BOOL)pressed {
-    if (self.mode >= 2) return;
-    if (self.mode == 0) {
-        if (!pressed) [self toggleRecording:nil];
-    } else [self holdEdge:pressed];
-}
-
 - (void)holdEdge:(BOOL)pressed {
     if (pressed && self.phase == Idle && !self.holding) {
         self.holding = YES;
@@ -346,65 +407,109 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
         else if (self.phase == RequestingMicrophone) {
             self.generation++;
             self.phase = Idle;
+            self.shortcutSession = NO;
             [self refresh];
         }
     }
 }
 
-- (void)configureShift {
-    if (self.shiftMonitor) [NSEvent removeMonitor:self.shiftMonitor];
-    self.shiftMonitor = nil;
-    [self.shiftTimer invalidate];
-    self.shiftDown = self.lastTap = 0;
-    if (self.mode < 2) return;
-    __weak VoiceKey *weakSelf = self;
-    self.shiftMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskFlagsChanged | NSEventMaskKeyDown
-        handler:^(NSEvent *event) { [weakSelf shiftEvent:event]; }];
-}
-
-- (void)shiftEvent:(NSEvent *)event {
-    NSEventModifierFlags flags = event.modifierFlags;
-    if (self.holding && !CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, kVK_Shift))
-        [self holdEdge:NO];
-    if (event.type != NSEventTypeFlagsChanged || event.keyCode != kVK_Shift ||
-        (flags & (NSEventModifierFlagControl | NSEventModifierFlagCommand | NSEventModifierFlagOption))) {
-        [self.shiftTimer invalidate];
-        self.shiftDown = self.lastTap = 0;
+- (void)observeShortcut:(NSEvent *)event {
+    if (self.shortcutButton.capture) {
+        if (event.type == NSEventTypeKeyUp) [self.pressedKeys removeIndex:event.keyCode];
         return;
     }
-    if (CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, kVK_Shift)) {
-        self.shiftDown = event.timestamp;
-        if (self.mode == 2) {
-            [self.shiftTimer invalidate];
-            self.shiftTimer = [NSTimer scheduledTimerWithTimeInterval:0.35 repeats:NO block:^(NSTimer *timer) {
-                [self holdEdge:YES];
-            }];
+    if (event.CGEvent && CGEventGetIntegerValueField(event.CGEvent, kCGEventSourceUnixProcessID) == getpid() &&
+        CGEventGetIntegerValueField(event.CGEvent, kCGEventSourceUserData) == dictationEventTag) return;
+    UInt32 mods = ShortcutModifiers(event.modifierFlags);
+    if (!ModifierForKey(self.shortcutKey)) {
+        // Carbon delivers the primary key. Releasing a required modifier also ends a hold.
+        if (event.type == NSEventTypeFlagsChanged && self.gesture.pressed &&
+            (mods & self.shortcutModifiers) != self.shortcutModifiers) {
+            [self.gesture edge:NO at:event.timestamp];
+        } else if (event.type == NSEventTypeKeyDown && event.keyCode != self.shortcutKey) {
+            [self.gesture cancel];
         }
-    } else {
-        [self.shiftTimer invalidate];
-        if (self.mode == 2) [self holdEdge:NO];
-        else if (self.shiftDown && event.timestamp - self.shiftDown < 0.3) {
-            if (self.lastTap && event.timestamp - self.lastTap <= NSEvent.doubleClickInterval) {
-                self.lastTap = 0;
-                [self toggleRecording:nil];
-            } else self.lastTap = event.timestamp;
-        } else self.lastTap = 0;
-        self.shiftDown = 0;
+        return;
     }
+    if (event.type == NSEventTypeKeyUp) {
+        [self.pressedKeys removeIndex:event.keyCode];
+        return;
+    }
+    if (event.type == NSEventTypeKeyDown) [self.pressedKeys addIndex:event.keyCode];
+    if (self.pressedKeys.count || (mods & ~self.shortcutModifiers) ||
+        (event.type == NSEventTypeFlagsChanged && !ModifierForKey(event.keyCode))) {
+        self.modifierBlocked = mods != 0;
+        [self.gesture cancel];
+        return;
+    }
+    BOOL matches = mods == self.shortcutModifiers;
+    BOOL single = !(mods & (mods - 1));
+    if (matches && single && event.keyCode != self.shortcutKey) matches = NO;
+    if (!self.modifierBlocked) [self.gesture edge:matches at:event.timestamp];
+    if (!mods) self.modifierBlocked = NO;
+}
+
+- (OSStatus)registerKey:(UInt32)key modifiers:(UInt32)mods {
+    if (self.hotKey && key == self.shortcutKey && mods == self.shortcutModifiers) return noErr;
+    EventHotKeyRef replacement = NULL;
+    EventHotKeyID identifier = {0x564b4559, self.shortcutID + 1};
+    if (!ModifierForKey(key)) {
+        if (!self.hotKeyHandler) return eventNotHandledErr;
+        OSStatus status = RegisterEventHotKey(key, mods, identifier, GetApplicationEventTarget(),
+                                              kEventHotKeyExclusive, &replacement);
+        if (status != noErr) return status;
+    }
+    if (self.hotKey) UnregisterEventHotKey(self.hotKey);
+    self.hotKey = replacement;
+    self.shortcutID = identifier.id;
+    return noErr;
+}
+
+- (void)loadShortcutSettings:(NSUserDefaults *)defaults {
+    self.shortcutKey = (UInt32)[defaults integerForKey:@"shortcutKey"];
+    self.shortcutModifiers = (UInt32)[defaults integerForKey:@"shortcutModifiers"];
+    self.shortcutTitle = [defaults stringForKey:@"shortcutTitle"];
+    NSInteger legacyMode = [defaults integerForKey:@"recordingMode"];
+    self.gesture.mode = legacyMode == 1 || legacyMode == 2 ? HoldRecording : ToggleRecording;
+    NSInteger savedGesture = [defaults integerForKey:@"shortcutGesture"];
+    self.gesture.kind = savedGesture >= TapGesture && savedGesture <= DoubleTapGesture ? savedGesture : TapGesture;
+    if (![defaults objectForKey:@"shortcutGesture"] && (legacyMode == 2 || legacyMode == 3)) {
+        self.gesture.kind = legacyMode == 2 ? HoldGesture : DoubleTapGesture;
+        self.shortcutKey = kVK_Shift;
+        self.shortcutModifiers = shiftKey;
+        self.shortcutTitle = @"Left Shift";
+    }
+    if (ShortcutProblem(self.shortcutKey, self.shortcutModifiers, self.shortcutTitle, self.gesture.kind)) {
+        self.shortcutKey = kVK_Space;
+        self.shortcutModifiers = optionKey | shiftKey;
+        self.shortcutTitle = defaultShortcut;
+    }
+}
+
+- (void)saveShortcutSettings {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults setInteger:self.gesture.mode forKey:@"recordingMode"];
+    [defaults setInteger:self.gesture.kind forKey:@"shortcutGesture"];
+    [defaults setInteger:self.shortcutKey forKey:@"shortcutKey"];
+    [defaults setInteger:self.shortcutModifiers forKey:@"shortcutModifiers"];
+    [defaults setObject:self.shortcutTitle forKey:@"shortcutTitle"];
 }
 
 - (void)changeMode:(NSPopUpButton *)sender {
-    self.mode = sender.indexOfSelectedItem;
-    [NSUserDefaults.standardUserDefaults setInteger:self.mode forKey:@"recordingMode"];
-    if (self.mode >= 2 && self.hotKey) {
-        UnregisterEventHotKey(self.hotKey);
-        self.hotKey = NULL;
-    } else if (self.mode < 2 && !self.hotKey) {
-        EventHotKeyID identifier = {0x564b4559, ++_shortcutID};
-        self.shortcutStatus = RegisterEventHotKey(self.shortcutKey, self.shortcutModifiers, identifier,
-            GetApplicationEventTarget(), kEventHotKeyExclusive, &_hotKey);
+    [self.gesture cancel];
+    if (sender == self.modePicker) self.gesture.mode = sender.indexOfSelectedItem;
+    else {
+        GestureKind kind = sender.indexOfSelectedItem;
+        NSString *problem = ShortcutProblem(self.shortcutKey, self.shortcutModifiers, self.shortcutTitle, kind);
+        if (problem) {
+            [sender selectItemAtIndex:self.gesture.kind];
+            [self endShortcutCapture:@"Choose a Tap-compatible shortcut first, such as Option–Space."];
+            return;
+        }
+        self.gesture.kind = kind;
     }
-    [self configureShift];
+    [self endShortcutCapture:@"Click the shortcut to change it."];
+    [self saveShortcutSettings];
     [self refresh];
 }
 
@@ -428,8 +533,8 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.shortcutButton.target = self;
     self.shortcutButton.action = @selector(captureShortcut:);
     [self.shortcutButton setAccessibilityLabel:@"Change global recording shortcut"];
-    NSButton *reset = [self button:@"Reset" action:@selector(resetShortcut:)];
-    NSStackView *shortcutRow = Stack(NSUserInterfaceLayoutOrientationHorizontal, @[self.shortcutButton, reset], 8);
+    self.resetButton = [self button:@"Reset" action:@selector(resetShortcut:)];
+    NSStackView *shortcutRow = Stack(NSUserInterfaceLayoutOrientationHorizontal, @[self.shortcutButton, self.resetButton], 8);
     self.shortcutMessage = Label(@"Click the shortcut, then press a new key combination.", 12, NSFontWeightRegular, secondary);
 
     self.settingsPicker = [self newModelPicker];
@@ -471,16 +576,27 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     NSTextField *generalHeading = Label(@"General", 14, NSFontWeightSemibold, primary);
     self.uninstallButton = [self button:@"Uninstall Sayso…" action:@selector(uninstall:)];
     self.modePicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.modePicker addItemsWithTitles:@[@"Toggle with shortcut", @"Hold shortcut to talk", @"Hold left Shift to talk", @"Double-tap left Shift to toggle"]];
-    [self.modePicker selectItemAtIndex:self.mode];
-    self.modePicker.target = self;
-    self.modePicker.action = @selector(changeMode:);
+    [self.modePicker addItemsWithTitles:@[@"Toggle", @"Hold"]];
+    self.gesturePicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.gesturePicker addItemsWithTitles:@[@"Tap", @"Hold", @"Double tap"]];
+    [self.modePicker selectItemAtIndex:self.gesture.mode];
+    [self.gesturePicker selectItemAtIndex:self.gesture.kind];
+    for (NSPopUpButton *picker in @[self.modePicker, self.gesturePicker]) {
+        picker.target = self;
+        picker.action = @selector(changeMode:);
+    }
+    [self.modePicker setAccessibilityLabel:@"Recording mode"];
+    [self.gesturePicker setAccessibilityLabel:@"Shortcut gesture"];
+    NSStackView *modeRow = Stack(NSUserInterfaceLayoutOrientationHorizontal,
+        @[Label(@"Recording mode", 13, NSFontWeightRegular, primary), self.modePicker], 12);
+    NSStackView *gestureRow = Stack(NSUserInterfaceLayoutOrientationHorizontal,
+        @[Label(@"Shortcut gesture", 13, NSFontWeightRegular, primary), self.gesturePicker], 12);
     NSButton *sounds = [NSButton checkboxWithTitle:@"Play soft recording sounds" target:self action:@selector(soundSetting:)];
     sounds.state = [NSUserDefaults.standardUserDefaults boolForKey:@"recordingSounds"];
     self.checkButton = [self button:@"Check for Updates…" action:@selector(checkUpdates:)];
     NSStackView *updates = Stack(NSUserInterfaceLayoutOrientationHorizontal, @[self.checkButton, self.settingsUpdate], 8);
     NSTabView *tabs = [NSTabView new];
-    NSArray *groups = @[@[shortcutHeading, self.modePicker, shortcutRow, self.shortcutMessage, sounds],
+    NSArray *groups = @[@[modeRow, gestureRow, shortcutHeading, shortcutRow, self.shortcutMessage, sounds],
                         @[modelsHeading, modelRow, languageRow, self.settingsModelStatus, self.settingsProgress],
                         @[generalHeading, loginRow, self.loginMessage, updates, self.updateStatus, self.uninstallButton]];
     NSArray *titles = @[@"Recording", @"Models", @"General"];
@@ -515,19 +631,31 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 
 - (void)captureShortcut:(id)sender {
     if (self.shortcutButton.capture) return;
+    [self.gesture cancel];
+    if (self.hotKey) {
+        UnregisterEventHotKey(self.hotKey);
+        self.hotKey = NULL;
+    }
     __weak VoiceKey *app = self;
     self.shortcutButton.capture = ^(NSEvent *event) { [app handleShortcutCapture:event]; };
     if ([self.settingsWindow makeFirstResponder:self.shortcutButton]) {
         self.shortcutButton.title = @"Press shortcut…";
-        self.shortcutMessage.stringValue = @"Use ⌘, ⌥, or ⌃ with another key. Esc cancels.";
+        self.shortcutMessage.stringValue = self.gesture.kind == TapGesture ?
+            @"Press a combination with a modifier. Esc cancels." : @"Press a modifier or a modified shortcut. Esc cancels.";
     } else {
         [self endShortcutCapture:@"Click the shortcut again to start recording keys."];
     }
 }
 
 - (void)endShortcutCapture:(NSString *)message {
+    if (self.shortcutButton.capture && !self.hotKey && !ModifierForKey(self.shortcutKey)) {
+        self.shortcutStatus = [self registerKey:self.shortcutKey modifiers:self.shortcutModifiers];
+        if (self.shortcutStatus != noErr) message = @"Shortcut unavailable. Try a different combination.";
+    }
     self.shortcutButton.capture = nil;
     self.shortcutButton.capturedKeyDown = nil;
+    self.shortcutButton.capturedModifiers = nil;
+    self.shortcutButton.usedRegularKey = NO;
     self.shortcutButton.title = self.shortcutTitle;
     self.shortcutMessage.stringValue = message;
 }
@@ -544,6 +672,18 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     if (flags & NSEventModifierFlagOption) { modifiers |= optionKey; [title appendString:@"⌥"]; }
     if (flags & NSEventModifierFlagShift) { modifiers |= shiftKey; [title appendString:@"⇧"]; }
     if (flags & NSEventModifierFlagCommand) { modifiers |= cmdKey; [title appendString:@"⌘"]; }
+    if (event.type == NSEventTypeFlagsChanged) {
+        if (!(modifiers & (modifiers - 1))) {
+            NSDictionary *names = @{@(kVK_Shift): @"Left Shift", @(kVK_RightShift): @"Right Shift",
+                @(kVK_Option): @"Left Option", @(kVK_RightOption): @"Right Option",
+                @(kVK_Control): @"Left Control", @(kVK_RightControl): @"Right Control",
+                @(kVK_Command): @"Left Command", @(kVK_RightCommand): @"Right Command"};
+            if (!names[@(event.keyCode)]) return;
+            [title setString:names[@(event.keyCode)]];
+        }
+        [self setShortcutKey:event.keyCode modifiers:modifiers title:title];
+        return;
+    }
     NSString *key = event.charactersIgnoringModifiers;
     unichar character = key.length ? [key characterAtIndex:0] : 0;
     if (character >= NSF1FunctionKey && character <= NSF20FunctionKey) {
@@ -561,10 +701,10 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
         }
     }
     unichar displayCharacter = key.length ? [key characterAtIndex:0] : 0;
-    if (!(modifiers & (controlKey | optionKey | cmdKey)) || key.length == 0 ||
+    if (key.length == 0 ||
         [NSCharacterSet.controlCharacterSet characterIsMember:displayCharacter] ||
         (displayCharacter >= 0xF700 && displayCharacter <= 0xF8FF)) {
-        self.shortcutMessage.stringValue = @"Use ⌘, ⌥, or ⌃ with a printable key or a function key.";
+        self.shortcutMessage.stringValue = @"Choose a printable key, navigation key, or function key with a modifier.";
         return;
     }
     [title appendString:key.uppercaseString.length == 1 ? key.uppercaseString : key];
@@ -576,28 +716,23 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 }
 
 - (void)setShortcutKey:(UInt32)key modifiers:(UInt32)mods title:(NSString *)title {
-    if (self.hotKey && key == self.shortcutKey && mods == self.shortcutModifiers) {
-        [self endShortcutCapture:@"This shortcut is already active."];
+    NSString *problem = ShortcutProblem(key, mods, title, self.gesture.kind);
+    if (problem) {
+        self.shortcutMessage.stringValue = problem;
         return;
     }
-    const EventHotKeyID identifier = {0x564b4559, self.shortcutID + 1};
-    EventHotKeyRef replacement = NULL;
-    if (!self.hotKeyHandler || RegisterEventHotKey(key, mods, identifier, GetApplicationEventTarget(),
-        kEventHotKeyExclusive, &replacement) != noErr) {
+    if ([self registerKey:key modifiers:mods] != noErr) {
         [self endShortcutCapture:@"Shortcut unavailable. Try a different combination."];
         return;
     }
-    if (self.hotKey) UnregisterEventHotKey(self.hotKey);
-    self.hotKey = replacement;
-    self.shortcutID = identifier.id;
+    [self.gesture cancel];
+    self.modifierBlocked = NO;
+    [self.pressedKeys removeAllIndexes];
     self.shortcutStatus = noErr;
     self.shortcutKey = key;
     self.shortcutModifiers = mods;
     self.shortcutTitle = title;
-    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    [defaults setInteger:key forKey:@"shortcutKey"];
-    [defaults setInteger:mods forKey:@"shortcutModifiers"];
-    [defaults setObject:title forKey:@"shortcutTitle"];
+    [self saveShortcutSettings];
     [self endShortcutCapture:@"Shortcut updated."];
     [self refresh];
 }
@@ -720,6 +855,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 }
 
 - (void)showPopover {
+    if (self.phase == Recording || self.phase == RequestingMicrophone || self.phase == Transcribing) return;
     if (!self.popover.shown && self.statusItem.button.window) {
         NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
         if (front.processIdentifier != NSRunningApplication.currentApplication.processIdentifier)
@@ -757,6 +893,13 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 }
 
 - (void)refresh {
+    if (self.indicatorPhase != self.phase) {
+        if (self.phase == Recording) [self.indicator showListening];
+        else if (self.phase == Transcribing) [self.indicator showPending:@"Processing…"];
+        else if (self.phase == RequestingMicrophone) [self.indicator showPending:@"Preparing microphone…"];
+        else [self.indicator hide];
+        self.indicatorPhase = self.phase;
+    }
     BOOL hasSelection = self.selectedModel != noModel;
     BOOL installed = [self modelExists];
     BOOL downloading = self.phase == Downloading || self.phase == CancelingDownload || self.phase == Verifying;
@@ -832,9 +975,10 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.stateImage.contentTintColor = tint;
     self.headline.stringValue = title;
     self.detail.stringValue = subtitle;
-    self.keyLabel.stringValue = self.mode == 2 ? @"Hold left Shift" : self.mode == 3 ? @"Double-tap left Shift" : self.shortcutStatus == noErr ? self.shortcutTitle : @"";
+    self.keyLabel.stringValue = self.gesture.kind == TapGesture ? self.shortcutTitle :
+        [NSString stringWithFormat:@"%@ %@", self.gesture.kind == HoldGesture ? @"Hold" : @"Double-tap", self.shortcutTitle];
     [self.keyLabel setAccessibilityLabel:[@"Global shortcut " stringByAppendingString:self.shortcutTitle]];
-    self.keyLabel.hidden = self.mode < 2 && self.shortcutStatus != noErr;
+    self.keyLabel.hidden = self.shortcutStatus != noErr;
 
     self.recordButton.title = self.phase == Recording ? @"Stop dictation" :
                               denied ? @"Microphone Settings" : !AXIsProcessTrusted() ? @"Enable keyboard access…" : @"Start dictation";
@@ -853,9 +997,8 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.settingsUpdate.hidden = !self.updater.availableVersion;
     self.checkButton.enabled = available && !self.updater.checking;
     self.checkButton.title = self.updater.checking ? @"Checking…" : @"Check for Updates…";
-    self.modePicker.enabled = available;
-    self.shortcutButton.superview.hidden = self.mode >= 2;
-    self.shortcutMessage.hidden = self.mode >= 2;
+    self.modePicker.enabled = self.gesturePicker.enabled = available;
+    self.shortcutButton.enabled = self.resetButton.enabled = available;
     self.updateButton.enabled = self.settingsUpdate.enabled = available && !self.updater.checking;
     self.updateStatus.stringValue = self.updater.status;
     self.updateButton.toolTip = self.updater.status;
@@ -903,7 +1046,8 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 - (void)activateModel:(NSInteger)index {
     self.recognizer = nil;
     self.selectedModel = index;
-    [NSUserDefaults.standardUserDefaults setInteger:self.selectedModel forKey:@"selectedModel"];
+    [NSUserDefaults.standardUserDefaults setObject:index == noModel ? @"" : @(models[index].filename)
+                                            forKey:selectedModelKey];
     self.notice = nil;
     self.failed = NO;
     [self refresh];
@@ -930,7 +1074,9 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.failed = YES;
     self.notice = message;
     [self refresh];
-    if (!self.settingsWindow.keyWindow) [self showPopover];
+    if (self.shortcutSession) [self.indicator showNotice:message];
+    else if (!self.settingsWindow.keyWindow) [self showPopover];
+    self.shortcutSession = self.holding = NO;
 }
 
 - (NSURL *)partialURL { return [[self modelURL] URLByAppendingPathExtension:@"download"]; }
@@ -1152,8 +1298,19 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 
 - (void)toggleRecording:(id)sender {
     if (self.phase == Recording) { [self finishRecording]; return; }
+    if (!sender && self.phase == RequestingMicrophone && self.gesture.mode == ToggleRecording) {
+        self.generation++;
+        self.phase = Idle;
+        self.shortcutSession = NO;
+        [self refresh];
+        return;
+    }
     if (self.phase != Idle || self.updater.installing) return;
-    if (![self modelExists]) { [self showPopover]; return; }
+    self.shortcutSession = sender == nil;
+    if (![self modelExists]) {
+        [self displayError:@"Choose and download a model from the Sayso menu to start dictating."];
+        return;
+    }
 
     NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
     self.destination = front.processIdentifier == NSRunningApplication.currentApplication.processIdentifier &&
@@ -1192,10 +1349,10 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 
 - (void)prepareDestination {
     NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
-    if (front.processIdentifier == NSRunningApplication.currentApplication.processIdentifier)
-        [self.destination activateWithOptions:0];
+    BOOL restoreFocus = front.processIdentifier == NSRunningApplication.currentApplication.processIdentifier;
+    if (restoreFocus) [self.destination activateWithOptions:0];
     NSUInteger request = self.generation;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, restoreFocus ? 150 * NSEC_PER_MSEC : 0), dispatch_get_main_queue(), ^{
         if (self.phase != RequestingMicrophone || request != self.generation) return;
         self.focusedElement = [self currentField];
         if (![self destinationIsReady]) {
@@ -1239,6 +1396,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.notice = nil;
     self.capture = [PhraseCapture new];
     __weak VoiceKey *app = self;
+    self.capture.level = ^(float rms) { [app.indicator addLevel:rms]; };
     self.capture.phrase = ^(NSData *samples) {
         [app.pending addObject:samples];
         [app processNextPhrase];
@@ -1282,6 +1440,8 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
         CGEventRef down = CGEventCreateKeyboardEvent(NULL, 0, true);
         CGEventRef up = CGEventCreateKeyboardEvent(NULL, 0, false);
         if (down && up) {
+            CGEventSetIntegerValueField(down, kCGEventSourceUserData, dictationEventTag);
+            CGEventSetIntegerValueField(up, kCGEventSourceUserData, dictationEventTag);
             CGEventSetFlags(down, 0);
             CGEventSetFlags(up, 0);
             CGEventKeyboardSetUnicodeString(down, character.length, units.bytes);
@@ -1301,7 +1461,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
         NSUInteger bytes = 0;
         for (NSData *phrase in self.pending) bytes += phrase.length;
         if (self.phase == Recording && bytes > 30 * 16000 * sizeof(float)) {
-            self.notice = @"Dictation stopped to finish queued speech. Choose a smaller model for lower latency.";
+            self.notice = @"Dictation stopped to finish queued speech.";
             dispatch_async(dispatch_get_main_queue(), ^{ if (self.phase == Recording) [self finishRecording]; });
         }
         return;
@@ -1313,7 +1473,8 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
             if (!self.notice) self.notice = self.typedPhrase ? @"Dictation finished." : @"No speech detected.";
             self.destination = nil;
             self.focusedElement = nil;
-            [self updateChanged];
+            if (self.shortcutSession) [self refresh]; else [self updateChanged];
+            self.shortcutSession = NO;
         }
         return;
     }

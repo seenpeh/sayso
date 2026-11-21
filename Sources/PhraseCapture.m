@@ -76,6 +76,7 @@ static void AudioInput(void *context, AudioQueueRef queue, AudioQueueBufferRef b
     if (!frames) return;
     float energy = 0;
     for (NSUInteger i = 0; i < frames; i++) energy += samples[i] * samples[i];
+    if (self.level) self.level(sqrtf(energy / frames));
     BOOL voiced = energy / frames > 0.0025f * 0.0025f;
     [_samples appendBytes:samples length:frames * sizeof(float)];
     _hasSpeech |= voiced;
