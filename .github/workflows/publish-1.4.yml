@@ -1,0 +1,22 @@
+name: Publish Sayso 1.4
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-1.4.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 9eb157c53dbf260306cc27c23d95eb176d4fbb3c
+      - name: Build and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(uname -m)" = arm64
+          bash build.sh "$PWD/Sayso-1.4-macOS-arm64.zip"
+          gh release create v1.4 Sayso-1.4-macOS-arm64.zip --target 9eb157c53dbf260306cc27c23d95eb176d4fbb3c --title "Sayso 1.4" --notes "Adds Nava Persian dictation and removes Whisper Tiny. Includes live keyboard entry and in-app update checks."
