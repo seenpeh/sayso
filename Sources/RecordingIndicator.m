@@ -4,6 +4,8 @@
 enum { barCount = 8 };
 static const CGFloat indicatorScale = 1.3;
 static const CGFloat barWidth = 2.7 * 1.3;
+static const CGFloat waveformCapsuleWidth = 60 * 1.3;
+static const CGFloat waveformCapsuleHeight = 40 * 1.3;
 static const CFTimeInterval morphDuration = 1.04;
 static const CFTimeInterval revolutionDuration = 1.8;
 static const CGFloat routeScale = 4.5 * 1.3 / 7;
@@ -310,7 +312,12 @@ static TrailSample sampleTrail(CGFloat distance) {
     NSSize labelSize = [self.label.cell cellSizeForBounds:NSMakeRect(0, 0, 300, CGFLOAT_MAX)];
     CGFloat height = MAX(38 * scale, ceil(labelSize.height) + 18);
     CGFloat width = ceil(labelSize.width) + start + 17 * scale;
-    if (!hasLabel) width = mode == WaveListening ? NSWidth(self.wave.frame) + 20 * scale : height;
+    if (usesBars && !hasLabel) {
+        width = waveformCapsuleWidth;
+        height = waveformCapsuleHeight;
+    } else if (!hasLabel) {
+        width = height;
+    }
     NSScreen *screen = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
     if (!screen) return;
     NSRect area = screen.visibleFrame;
@@ -318,7 +325,7 @@ static TrailSample sampleTrail(CGFloat distance) {
     CGFloat panelWidth = MAX(390, width + 12);
     [self.panel setFrame:NSMakeRect(round(NSMidX(area) - panelWidth / 2), NSMinY(area) + 14, panelWidth, height + 12) display:NO];
     self.surface.frame = NSMakeRect(round((panelWidth - width) / 2), 6, width, height);
-    self.surface.layer.cornerRadius = 19 * scale;
+    self.surface.layer.cornerRadius = usesBars && !hasLabel ? height / 2 : 19 * scale;
     self.label.frame = NSMakeRect(start, floor((height - labelSize.height) / 2), ceil(labelSize.width), ceil(labelSize.height));
     CGFloat waveX = hasLabel ? 15 * scale : (width - NSWidth(self.wave.frame)) / 2;
     [self.wave setFrameOrigin:NSMakePoint(waveX, (height - NSHeight(self.wave.frame)) / 2)];
