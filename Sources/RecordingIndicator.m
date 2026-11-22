@@ -1,13 +1,14 @@
 #import "RecordingIndicator.h"
 #import <QuartzCore/QuartzCore.h>
 
-enum { barCount = 8 };
+enum { barCount = 12, spokeCount = 8, trailingCount = barCount - spokeCount };
 static const CGFloat indicatorScale = 1.3;
 static const CGFloat barWidth = 2.7 * 1.3;
 static const CGFloat waveformCapsuleWidth = 60 * 1.3;
 static const CGFloat waveformCapsuleHeight = 40 * 1.3;
 static const CFTimeInterval morphDuration = 1.04;
 static const CFTimeInterval revolutionDuration = 1.8;
+static const CGFloat rowGap = 5.6;
 static const CGFloat routeScale = 4.5 * 1.3 / 7;
 
 static CAMediaTimingFunction *curlTiming(void) {
@@ -25,15 +26,9 @@ static void prepareTrail(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         const CGPoint points[] = {{0, 0},
-            {7.82746010638, -6.07280585106},
-            {9.79421542553, -3.703125},
-            {13.9122340426, -1.58277925532},
-            {19.6379654255, 1.33543882979},
-            {18.8550531915, 9.76795212766},
-            {13.6848404255, 11.9940159574},
-            {4.765625, 14.0046542553},
-            {3.93783244681, 6.49268617021},
-            {-7, 12.8}};
+            {4.37965425532, -6.59142287234}, {9.54288563830, -9.47473404255}, {14.06382978723, -7.52293882979},
+            {25.18118351064, -4.74833776596}, {23.87267287234, 11.63597074468}, {12.73038563830, 12.71609042553},
+            {2.78590425532, 13.57878989362}, {4.79554521277, 9.20744680851}, {-7, 12.8}};
         for (int i = 1; i < sampleCount; i++) {
             const CGPoint *p = points + 3 * ((i-1) / stepsPerBend);
             CGFloat t = (1 + (i-1) % stepsPerBend) / (CGFloat)stepsPerBend, u = 1-t;
@@ -97,7 +92,7 @@ static TrailSample sampleTrail(CGFloat distance) {
 }
 
 - (CGFloat)heightAtIndex:(NSUInteger)i {
-    static const CGFloat accents[barCount] = {8, 12, 16, 20, 18, 15, 12, 9};
+    static const CGFloat accents[barCount] = {8, 10, 13, 16, 18, 20, 19, 17, 15, 13, 11, 8};
     return (4 + accents[i] * (_reduceMotion ? .65 : _levels[i])) * indicatorScale;
 }
 
@@ -121,8 +116,8 @@ static TrailSample sampleTrail(CGFloat distance) {
     [_rotor removeAllAnimations];
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    CGFloat ringGap = 2*M_PI*12.8/barCount;
-    CGFloat entry = trail[sampleCount-1].distance, closed = entry + 7*ringGap;
+    CGFloat ringGap = 2*M_PI*12.8/spokeCount;
+    CGFloat entry = trail[sampleCount-1].distance, closed = entry + (spokeCount-1)*ringGap;
     const int frames = 90;
     NSMutableArray *positions[barCount], *angles[barCount], *sizes[barCount];
     CGFloat previousAngles[barCount] = {}, initialHeights[barCount];
@@ -131,7 +126,7 @@ static TrailSample sampleTrail(CGFloat distance) {
         initialHeights[i] = (bar.presentationLayer ?: bar).bounds.size.height;
         [bar removeAllAnimations];
         if (_mode == WaveListening) {
-            bar.position = CGPointMake(center.x+(i-3.5)*7*routeScale,center.y);
+            bar.position = CGPointMake(center.x+(i-(barCount-1)*.5)*rowGap*routeScale,center.y);
             bar.transform = CATransform3DIdentity;
             bar.bounds = CGRectMake(0,0,barWidth,[self heightAtIndex:i]);
             bar.opacity = 1;
@@ -144,28 +139,30 @@ static TrailSample sampleTrail(CGFloat distance) {
         for (int frame=morph?0:frames; frame<=frames; frame++) {
             CGFloat t=frame/(CGFloat)frames;
             CGFloat head=closed*smoothStep(t)+(2*M_PI*12.8/revolutionDuration)*morphDuration*t*t*(t-1);
-            CGFloat gap=7+(ringGap-7)*smoothStep(head/closed);
+            CGFloat gap=rowGap+(ringGap-rowGap)*smoothStep(head/closed);
             TrailSample poses[barCount];
-            CGFloat minX=CGFLOAT_MAX,maxX=-CGFLOAT_MAX,minY=CGFLOAT_MAX,maxY=-CGFLOAT_MAX;
-            for (int i=0; i<barCount; i++) {
-                poses[i]=sampleTrail(head-(7-i)*gap);
-                minX=MIN(minX,poses[i].x); maxX=MAX(maxX,poses[i].x);
-                minY=MIN(minY,poses[i].y); maxY=MAX(maxY,poses[i].y);
-            }
+            CGFloat rowOffset = (barCount-1)*rowGap/2;
+            CGFloat offset = rowOffset + (7-rowOffset)*smoothStep(head/(entry*.52));
+            for (int i=0; i<barCount; i++)
+                poses[i]=sampleTrail(head-(barCount-1-i)*gap);
             for (int i=0; i<barCount; i++) {
                 TrailSample p=poses[i];
-                CGPoint pos=CGPointMake(center.x+(p.x-(minX+maxX)/2)*routeScale,
-                                        center.y-(p.y-(minY+maxY)/2)*routeScale);
+                CGPoint pos=CGPointMake(center.x+(p.x+offset)*routeScale, center.y-p.y*routeScale);
                 CGFloat angle=previousAngles[i]+remainder(-p.angle-previousAngles[i],2*M_PI);
                 previousAngles[i]=angle;
-                CGFloat height=initialHeights[i]+(7.2*routeScale-initialHeights[i])*smoothStep((head-(7-i)*gap)/entry);
+                CGFloat height=initialHeights[i]+(7.2*routeScale-initialHeights[i])*smoothStep((head-(barCount-1-i)*gap)/entry);
                 for (int j=0; j<barCount; j++) {
                     CGFloat dx=poses[j].x-p.x,dy=poses[j].y-p.y,d=hypot(dx,dy);
                     if (d<.001) continue;
                     CGFloat projection=fabs((-dx*sin(p.angle)+dy*cos(p.angle))/d);
                     if (projection>.001) height=MIN(height,barWidth+MAX(0,d*routeScale-barWidth-1.5*routeScale)/projection);
                 }
-                CGRect bounds=CGRectMake(0,0,barWidth,height);
+                CGFloat size = 1;
+                if (i < trailingCount) {
+                    CGFloat delay = .08 + .045*i;
+                    size -= smoothStep((t-delay)/.42);
+                }
+                CGRect bounds=CGRectMake(0,0,barWidth*size,height*size);
                 if (morph) {
                     [positions[i] addObject:[NSValue valueWithPoint:pos]];
                     [angles[i] addObject:@(angle)];
@@ -174,7 +171,7 @@ static TrailSample sampleTrail(CGFloat distance) {
                 if (frame!=frames) continue;
                 CALayer *bar=_bars[i];
                 bar.position=pos; bar.transform=CATransform3DMakeRotation(angle,0,0,1);
-                bar.bounds=bounds; bar.opacity=1-.55*i/7.;
+                bar.bounds=bounds; bar.opacity=i < trailingCount ? 0 : 1-.55*(i-trailingCount)/(spokeCount-1);
                 if (morph) {
                     NSDictionary *tracks=@{@"position":positions[i],@"transform.rotation.z":angles[i],@"bounds":sizes[i]};
                     for (NSString *key in tracks) {
@@ -254,7 +251,7 @@ static TrailSample sampleTrail(CGFloat distance) {
     _surface.layer.borderWidth = .75;
     _surface.layer.borderColor = [NSColor colorWithWhite:1 alpha:.26].CGColor;
     [_panel.contentView addSubview:_surface];
-    _wave = [[LevelView alloc] initWithFrame:NSMakeRect(0, 0, 36 * indicatorScale, 38 * indicatorScale)];
+    _wave = [[LevelView alloc] initWithFrame:NSMakeRect(0, 0, waveformCapsuleWidth, waveformCapsuleHeight)];
     [_wave setAccessibilityElement:NO];
     _symbol = [NSImageView new];
     _symbol.contentTintColor = [NSColor colorWithSRGBRed:.83 green:.79 blue:1 alpha:1];
@@ -327,7 +324,7 @@ static TrailSample sampleTrail(CGFloat distance) {
     self.surface.frame = NSMakeRect(round((panelWidth - width) / 2), 6, width, height);
     self.surface.layer.cornerRadius = usesBars && !hasLabel ? height / 2 : 19 * scale;
     self.label.frame = NSMakeRect(start, floor((height - labelSize.height) / 2), ceil(labelSize.width), ceil(labelSize.height));
-    CGFloat waveX = hasLabel ? 15 * scale : (width - NSWidth(self.wave.frame)) / 2;
+    CGFloat waveX = hasLabel ? 33 * scale - NSWidth(self.wave.frame) / 2 : (width - NSWidth(self.wave.frame)) / 2;
     [self.wave setFrameOrigin:NSMakePoint(waveX, (height - NSHeight(self.wave.frame)) / 2)];
     self.symbol.frame = NSMakeRect(15, floor((height - 17) / 2), 17, 17);
     [self.panel orderFrontRegardless];
