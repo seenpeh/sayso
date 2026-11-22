@@ -365,6 +365,10 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     [self.updater check];
 }
 
+- (void)openReleases:(id)sender {
+    [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"https://github.com/seenpeh/sayso/releases"]];
+}
+
 - (void)updateAction:(id)sender {
     if (self.updater.availableVersion && self.phase == Idle) [self.updater install];
     else [self checkUpdates:sender];
@@ -642,8 +646,9 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     self.updateStatus = Caption(@"");
     self.uninstallButton = [self button:@"Uninstall Sayso…" action:@selector(uninstall:)];
     NSString *version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
+    NSButton *releases = [self button:@"GitHub Releases…" action:@selector(openReleases:)];
     NSStackView *updates = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-        @[self.checkButton, self.settingsUpdate, FlexibleSpace()], 6);
+        @[self.checkButton, self.settingsUpdate, FlexibleSpace(), releases], 6);
 
     NSArray *groups = @[
         @[PreferenceGroup(@[PreferenceRow(@"Recording mode", self.modePicker), self.modeHint, Rule(),
@@ -1129,8 +1134,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     self.updateButton.title = self.updater.installing ? @"Installing update…" : updateTitle;
     self.settingsUpdate.title = self.updateButton.title;
     self.settingsUpdate.hidden = !self.updater.availableVersion;
-    self.checkButton.hidden = self.updater.availableVersion != nil;
-    self.checkButton.enabled = available && !self.updater.checking;
+    self.checkButton.enabled = !self.updater.installing && !self.updater.checking;
     self.checkButton.title = self.updater.checking ? @"Checking…" : @"Check for Updates…";
     self.modeHint.stringValue = self.gesture.mode == HoldRecording ?
         @"Keep the shortcut pressed while speaking. Release to finish." :

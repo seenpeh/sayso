@@ -47,6 +47,7 @@ static NSDictionary *CompatibleAsset(NSArray *assets) {
     if (![assets isKindOfClass:NSArray.class]) return nil;
     for (NSDictionary *asset in assets) {
         if (![asset isKindOfClass:NSDictionary.class]) continue;
+        if (![asset isKindOfClass:NSDictionary.class]) continue;
         NSString *name = asset[@"name"], *address = asset[@"browser_download_url"], *digest = asset[@"digest"];
         if (![name isKindOfClass:NSString.class] || ![address isKindOfClass:NSString.class] ||
             ![digest isKindOfClass:NSString.class] || [digest rangeOfString:@"^sha256:[0-9a-f]{64}$"
@@ -135,34 +136,40 @@ static BOOL InstallBundle(NSURL *archive, NSDictionary *asset, NSString *version
     _checking = YES;
     _status = @"Checking GitHub…";
     if (self.changed) self.changed();
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:releasesAPI]];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:releasesAPI]
+        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:15];
+    [request setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
     [request setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
-    request.timeoutInterval = 20;
     [[_session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        NSInteger code = [(NSHTTPURLResponse *)response statusCode];
-        NSDictionary *release = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+        NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+        NSInteger code = http.statusCode;
+        id payload = code == 200 && data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+        NSDictionary *release = [payload isKindOfClass:NSDictionary.class] ? payload : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_checking = NO;
-            if (error || (code != 200 && code != 404)) {
-                self->_status = @"Could not check GitHub. Try again later.";
-            } else if (code == 404) {
-                self->_asset = nil;
-                self->_availableVersion = nil;
-                self->_status = @"No published release is available.";
+            if (error) {
+                self->_status = [NSString stringWithFormat:@"Could not reach GitHub. %@", error.localizedDescription];
+            } else if (code == 429 || (code == 403 && ([[http valueForHTTPHeaderField:@"X-RateLimit-Remaining"] isEqual:@"0"] ||
+                       [http valueForHTTPHeaderField:@"Retry-After"]))) {
+                self->_status = @"GitHub is limiting update checks. Try again later or open GitHub Releases.";
+            } else if (code != 200 && code != 404) {
+                self->_status = [NSString stringWithFormat:@"GitHub returned HTTP %ld. Try again or open GitHub Releases.", (long)code];
             } else {
-                NSString *version = [release isKindOfClass:NSDictionary.class] ? NumericVersion(release[@"tag_name"]) : nil;
-                NSString *current = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+                NSString *version = NumericVersion(release[@"tag_name"]);
+                NSString *current = NumericVersion([NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"]);
                 self->_asset = nil;
                 self->_availableVersion = nil;
-                if (!version || [release[@"draft"] boolValue] || [release[@"prerelease"] boolValue])
+                if (code == 404) self->_status = @"GitHub could not find a published release.";
+                else if (!version || !current || [release[@"draft"] isEqual:@YES] || [release[@"prerelease"] isEqual:@YES])
                     self->_status = @"GitHub did not return a stable version.";
                 else if (CompareVersions(version, current) != NSOrderedDescending)
-                    self->_status = @"You have the latest version.";
+                    self->_status = [NSString stringWithFormat:@"Sayso %@ is up to date. Checked at %@.", current,
+                        [NSDateFormatter localizedStringFromDate:NSDate.date dateStyle:NSDateFormatterNoStyle timeStyle:NSDateFormatterMediumStyle]];
                 else {
                     self->_asset = CompatibleAsset(release[@"assets"]);
                     if (self->_asset) self->_availableVersion = version;
                     self->_status = self->_asset ? [NSString stringWithFormat:@"Version %@ is ready to install.", version] :
-                        [NSString stringWithFormat:@"Version %@ has no compatible installer yet.", version];
+                        [NSString stringWithFormat:@"Version %@ has no verified installer for this Mac. See GitHub Releases.", version];
                 }
             }
             if (self.changed) self.changed();

@@ -1,35 +1,117 @@
 #import "RecordingIndicator.h"
 #import <QuartzCore/QuartzCore.h>
 
+enum { barCount = 8 };
+static const CGFloat barWidth = 2.7;
+static const CFTimeInterval morphDuration = .26;
+
+typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending };
+
 @interface LevelView : NSView {
-    CGFloat _levels[7];
+    CALayer *_rotor;
+    CALayer *_bars[barCount];
+    CGFloat _levels[barCount];
+    BOOL _reduceMotion;
 }
+@property (nonatomic) WaveMode mode;
 - (void)addLevel:(CGFloat)level;
-- (void)reset;
 @end
 
 @implementation LevelView
-- (void)reset {
-    memset(_levels, 0, sizeof(_levels));
-    self.needsDisplay = YES;
-}
-- (void)addLevel:(CGFloat)level {
-    if (self.hidden || NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) return;
-    CGFloat sample = MIN(1, sqrt(MAX(0, level)) * 2.5);
-    CGFloat previous = _levels[6];
-    memmove(_levels, _levels + 1, sizeof(_levels) - sizeof(CGFloat));
-    _levels[6] = previous + (sample - previous) * (sample > previous ? .72 : .35);
-    self.needsDisplay = YES;
-}
-- (void)drawRect:(NSRect)dirty {
-    const CGFloat stillHeights[] = {4, 8, 13, 17, 11, 7, 4};
-    BOOL still = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
-    for (NSInteger i = 0; i < 7; i++) {
-        CGFloat height = still ? stillHeights[i] : 3 + (stillHeights[i] + 2) * _levels[i];
-        [[NSColor colorWithSRGBRed:.75 + .03*i green:.71 + .035*i blue:1 alpha:1] setFill];
-        NSRect bar = NSMakeRect(i * 4.5, (NSHeight(self.bounds) - height) / 2, 2.7, height);
-        [[NSBezierPath bezierPathWithRoundedRect:bar xRadius:1.35 yRadius:1.35] fill];
+- (instancetype)initWithFrame:(NSRect)frame {
+    if (!(self = [super initWithFrame:frame])) return nil;
+    self.wantsLayer = YES;
+    self.hidden = YES;
+    _rotor = [CALayer layer];
+    _rotor.frame = self.bounds;
+    [self.layer addSublayer:_rotor];
+    for (NSUInteger i = 0; i < barCount; i++) {
+        CALayer *bar = [CALayer layer];
+        bar.cornerRadius = barWidth / 2;
+        bar.backgroundColor = [NSColor colorWithSRGBRed:.82 green:.80 blue:1 alpha:1].CGColor;
+        _bars[i] = bar;
+        [_rotor addSublayer:bar];
     }
+    NSWorkspace *workspace = NSWorkspace.sharedWorkspace;
+    _reduceMotion = workspace.accessibilityDisplayShouldReduceMotion;
+    [workspace.notificationCenter addObserver:self selector:@selector(motionPreferenceChanged:)
+        name:NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification object:nil];
+    return self;
+}
+
+- (CGFloat)heightAtIndex:(NSUInteger)i {
+    static const CGFloat accents[barCount] = {8, 12, 16, 20, 18, 15, 12, 9};
+    return 4 + accents[i] * (_reduceMotion ? .65 : _levels[i]);
+}
+
+- (void)addLevel:(CGFloat)level {
+    if (_mode != WaveListening || _reduceMotion) return;
+    CGFloat sample = MIN(1, sqrt(MAX(0, level)) * 2.5);
+    CGFloat previous = _levels[barCount - 1];
+    memmove(_levels, _levels + 1, sizeof(_levels) - sizeof(_levels[0]));
+    _levels[barCount - 1] = previous + (sample - previous) * (sample > previous ? .72 : .35);
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:.05];
+    for (NSUInteger i = 0; i < barCount; i++)
+        _bars[i].bounds = CGRectMake(0, 0, barWidth, [self heightAtIndex:i]);
+    [CATransaction commit];
+}
+
+- (void)applyModeAnimated:(BOOL)morph {
+    CGPoint center = CGPointMake(CGRectGetMidX(_rotor.bounds), CGRectGetMidY(_rotor.bounds));
+    [_rotor removeAnimationForKey:@"spin"];
+    [CATransaction begin];
+    [CATransaction setDisableActions:!morph];
+    [CATransaction setAnimationDuration:morphDuration];
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+    for (NSUInteger i = 0; i < barCount; i++) {
+        CALayer *bar = _bars[i];
+        if (!morph) [bar removeAllAnimations];
+        if (_mode == WaveHidden) continue;
+        if (_mode == WaveListening) {
+            bar.position = CGPointMake(center.x + (i - (barCount - 1) * .5) * 4.5, center.y);
+            bar.bounds = CGRectMake(0, 0, barWidth, [self heightAtIndex:i]);
+            bar.transform = CATransform3DIdentity;
+            bar.opacity = 1;
+        } else {
+            // Neighbors split above and below the row, keeping the pairs in left-to-right order.
+            NSUInteger column = i / 2;
+            CGFloat angle = (column + .5) * (2 * M_PI / barCount);
+            CGFloat side = i % 2 == 0 ? 1 : -1;
+            bar.position = CGPointMake(center.x - 8.4 * cos(angle), center.y + side * 8.4 * sin(angle));
+            bar.bounds = CGRectMake(0, 0, barWidth, 5.6);
+            bar.transform = CATransform3DMakeRotation(side * (M_PI_2 - angle), 0, 0, 1);
+            NSUInteger spoke = i % 2 == 0 ? column : barCount - 1 - column;
+            bar.opacity = .34 + .66 * spoke / (barCount - 1);
+        }
+    }
+    [CATransaction commit];
+    if (_mode == WavePending && !_reduceMotion) {
+        CABasicAnimation *spin = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+        spin.fromValue = @0;
+        spin.toValue = @(-2 * M_PI);
+        spin.duration = .9;
+        spin.beginTime = [_rotor convertTime:CACurrentMediaTime() fromLayer:nil] + (morph ? morphDuration : 0);
+        spin.repeatCount = HUGE_VALF;
+        spin.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+        [_rotor addAnimation:spin forKey:@"spin"];
+    }
+}
+
+- (void)setMode:(WaveMode)mode {
+    if (_mode == mode) return;
+    BOOL morph = _mode == WaveListening && mode == WavePending && !_reduceMotion;
+    _mode = mode;
+    self.hidden = mode == WaveHidden;
+    if (mode == WaveListening) memset(_levels, 0, sizeof(_levels));
+    [self applyModeAnimated:morph];
+}
+
+- (void)motionPreferenceChanged:(NSNotification *)notification {
+    BOOL reduced = NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
+    if (_reduceMotion == reduced) return;
+    _reduceMotion = reduced;
+    [self applyModeAnimated:NO];
 }
 @end
 
@@ -37,12 +119,12 @@
 @property NSPanel *panel;
 @property NSVisualEffectView *surface;
 @property LevelView *wave;
-@property NSProgressIndicator *spinner;
 @property NSImageView *symbol;
 @property NSTextField *label;
 @property NSTimer *dismissal;
 @property NSUInteger presentation;
 @property BOOL dismissing;
+@property CFTimeInterval earliestDismissal;
 @end
 
 @implementation RecordingIndicator
@@ -70,17 +152,15 @@
     _surface.layer.borderWidth = .75;
     _surface.layer.borderColor = [NSColor colorWithWhite:1 alpha:.26].CGColor;
     [_panel.contentView addSubview:_surface];
-    _wave = [LevelView new];
+    _wave = [[LevelView alloc] initWithFrame:NSMakeRect(0, 0, 36, 26)];
     [_wave setAccessibilityElement:NO];
-    _spinner = [NSProgressIndicator new];
-    _spinner.style = NSProgressIndicatorStyleSpinning;
-    _spinner.controlSize = NSControlSizeSmall;
     _symbol = [NSImageView new];
     _symbol.contentTintColor = [NSColor colorWithSRGBRed:.83 green:.79 blue:1 alpha:1];
+    _symbol.image = [NSImage imageWithSystemSymbolName:@"info.circle" accessibilityDescription:nil];
     _label = [NSTextField wrappingLabelWithString:@""];
     _label.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     _label.textColor = NSColor.whiteColor;
-    for (NSView *view in @[_wave, _spinner, _symbol, _label]) [_surface addSubview:view];
+    for (NSView *view in @[_wave, _symbol, _label]) [_surface addSubview:view];
     return self;
 }
 
@@ -109,25 +189,25 @@
     [layer addAnimation:group forKey:@"capsule"];
 }
 
-- (void)show:(NSString *)text listening:(BOOL)listening pending:(BOOL)pending {
+- (void)show:(NSString *)text waveMode:(WaveMode)mode {
     [self.dismissal invalidate];
     self.presentation++;
     BOOL appearing = !self.panel.visible || self.dismissing;
     self.dismissing = NO;
     BOOL motion = !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
-    BOOL spin = pending && motion;
-    self.wave.hidden = !listening;
-    self.spinner.hidden = !spin;
-    self.symbol.hidden = listening || spin;
-    self.symbol.image = [NSImage imageWithSystemSymbolName:pending ? @"ellipsis" : @"info.circle" accessibilityDescription:nil];
-    if (spin) [self.spinner startAnimation:nil]; else [self.spinner stopAnimation:nil];
+    BOOL usesBars = mode != WaveHidden;
+    BOOL finishing = mode == WavePending && self.wave.mode == WaveListening && motion && !appearing;
+    self.earliestDismissal = finishing ? CACurrentMediaTime() + morphDuration + .23 : 0;
+    self.wave.mode = mode;
+    self.symbol.hidden = usesBars;
     BOOL changing = !appearing && ![self.label.stringValue isEqualToString:text];
     CGFloat oldWidth = NSWidth(self.surface.bounds);
     self.label.stringValue = text;
-    CGFloat start = listening ? 55 : 40;
+    CGFloat start = usesBars ? 59 : 40;
     NSSize labelSize = [self.label.cell cellSizeForBounds:NSMakeRect(0, 0, 300, CGFLOAT_MAX)];
     CGFloat height = MAX(38, ceil(labelSize.height) + 18);
     CGFloat width = ceil(labelSize.width) + start + 17;
+    if (usesBars) width = MAX(156, width);
     NSScreen *screen = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
     if (!screen) return;
     NSRect area = screen.visibleFrame;
@@ -137,11 +217,11 @@
     self.surface.frame = NSMakeRect(round((panelWidth - width) / 2), 6, width, height);
     self.surface.layer.cornerRadius = 19;
     self.label.frame = NSMakeRect(start, floor((height - labelSize.height) / 2), ceil(labelSize.width), ceil(labelSize.height));
-    self.wave.frame = NSMakeRect(15, floor((height - 22) / 2), 32, 22);
-    self.symbol.frame = self.spinner.frame = NSMakeRect(15, floor((height - 17) / 2), 17, 17);
+    [self.wave setFrameOrigin:NSMakePoint(15, floor((height - NSHeight(self.wave.frame)) / 2))];
+    self.symbol.frame = NSMakeRect(15, floor((height - 17) / 2), 17, 17);
     [self.panel orderFrontRegardless];
     [self.panel invalidateShadow];
-    if (changing && motion) {
+    if (changing && motion && oldWidth != width) {
         CALayer *layer = self.surface.layer;
         CABasicAnimation *resize = [CABasicAnimation animationWithKeyPath:@"bounds.size.width"];
         resize.fromValue = @(oldWidth);
@@ -156,17 +236,17 @@
         [layer addAnimation:morph forKey:@"stateChange"];
     }
     if (appearing) {
-        [self.surface.layer removeAnimationForKey:@"stateChange"];        [self.surface.layer removeAnimationForKey:@"capsule"];
+        [self.surface.layer removeAnimationForKey:@"stateChange"];
+        [self.surface.layer removeAnimationForKey:@"capsule"];
         if (motion) [self animateCapsuleIn:YES];
     }
 }
 - (void)showListening {
-    [self.wave reset];
-    [self show:@"Listening" listening:YES pending:NO];
+    [self show:@"Listening" waveMode:WaveListening];
 }
-- (void)showPending:(NSString *)message { [self show:message listening:NO pending:YES]; }
+- (void)showPending:(NSString *)message { [self show:message waveMode:WavePending]; }
 - (void)showNotice:(NSString *)message {
-    [self show:message listening:NO pending:NO];
+    [self show:message waveMode:WaveHidden];
     __weak RecordingIndicator *indicator = self;
     self.dismissal = [NSTimer scheduledTimerWithTimeInterval:5 repeats:NO block:^(NSTimer *timer) { [indicator hide]; }];
 }
@@ -174,11 +254,19 @@
 - (void)hide {
     [self.dismissal invalidate];
     self.dismissal = nil;
-    [self.spinner stopAnimation:nil];
     if (!self.panel.visible || self.dismissing) return;
     NSUInteger token = ++self.presentation;
     if (NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
         [self.panel orderOut:nil];
+        self.wave.mode = WaveHidden;
+        return;
+    }
+    // Let even an empty final phrase complete the visual handoff. Input is already idle.
+    CFTimeInterval remaining = self.earliestDismissal - CACurrentMediaTime();
+    if (remaining > 0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(remaining * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (self.presentation == token) [self hide];
+        });
         return;
     }
     self.dismissing = YES;
@@ -186,6 +274,7 @@
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 130 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
         if (self.presentation != token) return;
         [self.panel orderOut:nil];
+        self.wave.mode = WaveHidden;
         [self.surface.layer removeAnimationForKey:@"capsule"];
         self.dismissing = NO;
     });
