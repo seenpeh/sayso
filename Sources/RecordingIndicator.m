@@ -5,27 +5,31 @@ enum { barCount = 8 };
 static const CGFloat indicatorScale = 1.3;
 static const CGFloat barWidth = 2.7 * 1.3;
 static const CFTimeInterval morphDuration = .39;
+static const CFTimeInterval revolutionDuration = .9;
+static const CFTimeInterval spinUpDuration = .15;
+
+static CAMediaTimingFunction *curlTiming(void) {
+    return [CAMediaTimingFunction functionWithControlPoints:1.0/3 :.25 :2.0/3 :1];
+}
 
 typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending };
 
 // Bend the row as one chain. Every adjoining pair turns through the same angle.
-static void curlPositions(CGPoint points[barCount], CGPoint center, CGFloat progress) {
+static void curlPositions(CGPoint points[barCount], CGPoint center, CGFloat progress, CGFloat leadAngle) {
     CGFloat turn = 2 * M_PI / barCount;
     CGFloat spacing = indicatorScale * (4.5 + progress * (2 * 8.4 * sin(turn / 2) - 4.5));
     points[0] = CGPointZero;
-    CGFloat left = 0, right = 0, bottom = 0, top = 0;
+    CGPoint sum = CGPointZero;
     for (NSUInteger i = 1; i < barCount; i++) {
-        CGFloat tangent = -(i - .5) * turn * progress;
+        CGFloat tangent = (leadAngle - (i - .5) * turn) * progress;
         points[i] = CGPointMake(points[i - 1].x + spacing * cos(tangent),
                                 points[i - 1].y + spacing * sin(tangent));
-        left = MIN(left, points[i].x);
-        right = MAX(right, points[i].x);
-        bottom = MIN(bottom, points[i].y);
-        top = MAX(top, points[i].y);
+        sum.x += points[i].x;
+        sum.y += points[i].y;
     }
     for (NSUInteger i = 0; i < barCount; i++) {
-        points[i].x += center.x - (left + right) / 2;
-        points[i].y += center.y - (bottom + top) / 2;
+        points[i].x += center.x - sum.x / barCount;
+        points[i].y += center.y - sum.y / barCount;
     }
 }
 
@@ -81,23 +85,28 @@ static void curlPositions(CGPoint points[barCount], CGPoint center, CGFloat prog
 
 - (void)applyModeAnimated:(BOOL)morph {
     CGPoint center = CGPointMake(CGRectGetMidX(_rotor.bounds), CGRectGetMidY(_rotor.bounds));
+    // With constant acceleration the ramp covers half the angle of steady rotation.
+    // Lead the curl by that angle so the first spoke reaches twelve o’clock at full speed.
+    CGFloat leadAngle = morph ? M_PI * spinUpDuration / revolutionDuration : 0;
+    CFTimeInterval start = [_rotor convertTime:CACurrentMediaTime() fromLayer:nil];
+    [_rotor removeAnimationForKey:@"spinUp"];
     [_rotor removeAnimationForKey:@"spin"];
     [CATransaction begin];
     [CATransaction setDisableActions:!morph];
     [CATransaction setAnimationDuration:morphDuration];
-    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+    [CATransaction setAnimationTimingFunction:curlTiming()];
     NSMutableArray<NSValue *> *paths[barCount];
     CGPoint positions[barCount];
     if (_mode == WavePending) {
         if (morph) {
             for (NSUInteger i = 0; i < barCount; i++) paths[i] = [NSMutableArray array];
-            for (NSUInteger frame = 0; frame <= 30; frame++) {
-                curlPositions(positions, center, frame / 30.0);
+            for (NSUInteger frame = 0; frame <= 60; frame++) {
+                curlPositions(positions, center, frame / 60.0, leadAngle);
                 for (NSUInteger i = 0; i < barCount; i++)
                     [paths[i] addObject:[NSValue valueWithPoint:positions[i]]];
             }
         } else {
-            curlPositions(positions, center, 1);
+            curlPositions(positions, center, 1, leadAngle);
         }
     }
     for (NSUInteger i = 0; i < barCount; i++) {
@@ -110,7 +119,7 @@ static void curlPositions(CGPoint points[barCount], CGPoint center, CGFloat prog
             bar.transform = CATransform3DIdentity;
             bar.opacity = 1;
         } else {
-            CGFloat rotation = -(CGFloat)i * (2 * M_PI / barCount);
+            CGFloat rotation = leadAngle - (CGFloat)i * (2 * M_PI / barCount);
             bar.position = positions[i];
             bar.bounds = CGRectMake(0, 0, barWidth, 5.6 * indicatorScale);
             bar.transform = CATransform3DMakeRotation(rotation, 0, 0, 1);
@@ -118,12 +127,14 @@ static void curlPositions(CGPoint points[barCount], CGPoint center, CGFloat prog
             if (morph) {
                 CAKeyframeAnimation *curl = [CAKeyframeAnimation animationWithKeyPath:@"position"];
                 curl.values = paths[i];
+                curl.beginTime = [bar convertTime:start fromLayer:_rotor];
                 curl.duration = morphDuration;
                 curl.timingFunction = CATransaction.animationTimingFunction;
                 [bar addAnimation:curl forKey:@"position"];
                 CABasicAnimation *tilt = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
                 tilt.fromValue = @0;
                 tilt.toValue = @(rotation);
+                tilt.beginTime = curl.beginTime;
                 tilt.duration = morphDuration;
                 tilt.timingFunction = curl.timingFunction;
                 [bar removeAnimationForKey:@"transform"];
@@ -133,11 +144,21 @@ static void curlPositions(CGPoint points[barCount], CGPoint center, CGFloat prog
     }
     [CATransaction commit];
     if (_mode == WavePending && !_reduceMotion) {
+        if (morph) {
+            CABasicAnimation *ramp = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+            ramp.fromValue = @0;
+            ramp.toValue = @(-leadAngle);
+            ramp.duration = spinUpDuration;
+            ramp.beginTime = start + morphDuration - spinUpDuration;
+            // A quadratic angle curve reaches the loop’s angular velocity at the handoff.
+            ramp.timingFunction = [CAMediaTimingFunction functionWithControlPoints:1.0/3 :0 :2.0/3 :1.0/3];
+            [_rotor addAnimation:ramp forKey:@"spinUp"];
+        }
         CABasicAnimation *spin = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
-        spin.fromValue = @0;
-        spin.toValue = @(-2 * M_PI);
-        spin.duration = .9;
-        spin.beginTime = [_rotor convertTime:CACurrentMediaTime() fromLayer:nil] + (morph ? morphDuration : 0);
+        spin.fromValue = @(-leadAngle);
+        spin.toValue = @(-leadAngle - 2 * M_PI);
+        spin.duration = revolutionDuration;
+        spin.beginTime = start + (morph ? morphDuration : 0);
         spin.repeatCount = HUGE_VALF;
         spin.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
         [_rotor addAnimation:spin forKey:@"spin"];
@@ -282,7 +303,7 @@ static void curlPositions(CGPoint points[barCount], CGPoint center, CGFloat prog
         CAAnimationGroup *morph = [CAAnimationGroup animation];
         morph.animations = @[resize, center];
         morph.duration = finishing ? morphDuration : .16;
-        morph.timingFunction = [CAMediaTimingFunction functionWithName:finishing ? kCAMediaTimingFunctionEaseInEaseOut : kCAMediaTimingFunctionEaseOut];
+        morph.timingFunction = finishing ? curlTiming() : [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
         if (!hasLabel) {
             CABasicAnimation *align = [CABasicAnimation animationWithKeyPath:@"position.x"];
             align.additive = YES;
