@@ -4,9 +4,9 @@
 enum { barCount = 8 };
 static const CGFloat indicatorScale = 1.3;
 static const CGFloat barWidth = 2.7 * 1.3;
-static const CFTimeInterval morphDuration = .39;
-static const CFTimeInterval revolutionDuration = .9;
-static const CFTimeInterval spinUpDuration = .15;
+static const CFTimeInterval morphDuration = 1.04;
+static const CFTimeInterval revolutionDuration = 1.8;
+static const CGFloat routeScale = 4.5 * 1.3 / 7;
 
 static CAMediaTimingFunction *curlTiming(void) {
     return [CAMediaTimingFunction functionWithControlPoints:1.0/3 :.25 :2.0/3 :1];
@@ -14,25 +14,54 @@ static CAMediaTimingFunction *curlTiming(void) {
 
 typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending };
 
-// Bend the row as one chain. Every adjoining pair turns through the same angle.
-static void curlPositions(CGPoint points[barCount], CGPoint center, CGFloat progress, CGFloat leadAngle) {
-    CGFloat turn = 2 * M_PI / barCount;
-    CGFloat spacing = indicatorScale * (4.5 + progress * (2 * 8.4 * sin(turn / 2) - 4.5));
-    points[0] = CGPointZero;
-    CGPoint sum = CGPointZero;
-    for (NSUInteger i = 1; i < barCount; i++) {
-        CGFloat tangent = (leadAngle - (i - .5) * turn) * progress;
-        points[i] = CGPointMake(points[i - 1].x + spacing * cos(tangent),
-                                points[i - 1].y + spacing * sin(tangent));
-        sum.x += points[i].x;
-        sum.y += points[i].y;
-    }
-    for (NSUInteger i = 0; i < barCount; i++) {
-        points[i].x += center.x - sum.x / barCount;
-        points[i].y += center.y - sum.y / barCount;
-    }
-}
+// Arc-length samples of the three cubics from the saved path editor.
+enum { stepsPerBend = 180, sampleCount = 3 * stepsPerBend + 1 };
+typedef struct { CGFloat x, y, angle, distance; } TrailSample;
+static TrailSample trail[sampleCount];
 
+static void prepareTrail(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const CGPoint points[] = {{0, 0},
+            {7.82746010638, -6.07280585106},
+            {9.79421542553, -3.703125},
+            {13.9122340426, -1.58277925532},
+            {19.6379654255, 1.33543882979},
+            {18.8550531915, 9.76795212766},
+            {13.6848404255, 11.9940159574},
+            {4.765625, 14.0046542553},
+            {3.93783244681, 6.49268617021},
+            {-7, 12.8}};
+        for (int i = 1; i < sampleCount; i++) {
+            const CGPoint *p = points + 3 * ((i-1) / stepsPerBend);
+            CGFloat t = (1 + (i-1) % stepsPerBend) / (CGFloat)stepsPerBend, u = 1-t;
+            CGFloat x = u*u*u*p[0].x + 3*u*u*t*p[1].x + 3*u*t*t*p[2].x + t*t*t*p[3].x;
+            CGFloat y = u*u*u*p[0].y + 3*u*u*t*p[1].y + 3*u*t*t*p[2].y + t*t*t*p[3].y;
+            TrailSample prev = trail[i-1];
+            trail[i] = (TrailSample){x,y,atan2(y-prev.y,x-prev.x),prev.distance+hypot(x-prev.x,y-prev.y)};
+        }
+    });
+}
+static CGFloat smoothStep(CGFloat t) {
+    t = MIN(1,MAX(0,t));
+    return t*t*(3-2*t);
+}
+static TrailSample sampleTrail(CGFloat distance) {
+    CGFloat entry = trail[sampleCount-1].distance;
+    if (distance <= 0) return (TrailSample){distance,0,0,0};
+    if (distance >= entry) {
+        CGFloat a = M_PI_2 + (distance-entry)/12.8;
+        return (TrailSample){-7+12.8*cos(a),12.8*sin(a),a+M_PI_2,distance};
+    }
+    int lo=0, hi=sampleCount-1;
+    while (hi-lo>1) {
+        int mid=(lo+hi)/2;
+        if (trail[mid].distance<distance) lo=mid; else hi=mid;
+    }
+    TrailSample a=trail[lo], b=trail[hi];
+    CGFloat f=(distance-a.distance)/(b.distance-a.distance);
+    return (TrailSample){a.x+f*(b.x-a.x),a.y+f*(b.y-a.y),b.angle,distance};
+}
 @interface LevelView : NSView {
     CALayer *_rotor;
     CALayer *_bars[barCount];
@@ -85,84 +114,88 @@ static void curlPositions(CGPoint points[barCount], CGPoint center, CGFloat prog
 
 - (void)applyModeAnimated:(BOOL)morph {
     CGPoint center = CGPointMake(CGRectGetMidX(_rotor.bounds), CGRectGetMidY(_rotor.bounds));
-    // With constant acceleration the ramp covers half the angle of steady rotation.
-    // Lead the curl by that angle so the first spoke reaches twelve o’clock at full speed.
-    CGFloat leadAngle = morph ? M_PI * spinUpDuration / revolutionDuration : 0;
+    prepareTrail();
     CFTimeInterval start = [_rotor convertTime:CACurrentMediaTime() fromLayer:nil];
-    [_rotor removeAnimationForKey:@"spinUp"];
-    [_rotor removeAnimationForKey:@"spin"];
+    [_rotor removeAllAnimations];
     [CATransaction begin];
-    [CATransaction setDisableActions:!morph];
-    [CATransaction setAnimationDuration:morphDuration];
-    [CATransaction setAnimationTimingFunction:curlTiming()];
-    NSMutableArray<NSValue *> *paths[barCount];
-    CGPoint positions[barCount];
-    if (_mode == WavePending) {
+    [CATransaction setDisableActions:YES];
+    CGFloat ringGap = 2*M_PI*12.8/barCount;
+    CGFloat entry = trail[sampleCount-1].distance, closed = entry + 7*ringGap;
+    const int frames = 90;
+    NSMutableArray *positions[barCount], *angles[barCount], *sizes[barCount];
+    CGFloat previousAngles[barCount] = {}, initialHeights[barCount];
+    for (int i=0; i<barCount; i++) {
+        CALayer *bar = _bars[i];
+        initialHeights[i] = (bar.presentationLayer ?: bar).bounds.size.height;
+        [bar removeAllAnimations];
+        if (_mode == WaveListening) {
+            bar.position = CGPointMake(center.x+(i-3.5)*7*routeScale,center.y);
+            bar.transform = CATransform3DIdentity;
+            bar.bounds = CGRectMake(0,0,barWidth,[self heightAtIndex:i]);
+            bar.opacity = 1;
+        }
         if (morph) {
-            for (NSUInteger i = 0; i < barCount; i++) paths[i] = [NSMutableArray array];
-            for (NSUInteger frame = 0; frame <= 60; frame++) {
-                curlPositions(positions, center, frame / 60.0, leadAngle);
-                for (NSUInteger i = 0; i < barCount; i++)
-                    [paths[i] addObject:[NSValue valueWithPoint:positions[i]]];
-            }
-        } else {
-            curlPositions(positions, center, 1, leadAngle);
+            positions[i]=[NSMutableArray array]; angles[i]=[NSMutableArray array]; sizes[i]=[NSMutableArray array];
         }
     }
-    for (NSUInteger i = 0; i < barCount; i++) {
-        CALayer *bar = _bars[i];
-        if (!morph) [bar removeAllAnimations];
-        if (_mode == WaveHidden) continue;
-        if (_mode == WaveListening) {
-            bar.position = CGPointMake(center.x + (i - (barCount - 1) * .5) * 4.5 * indicatorScale, center.y);
-            bar.bounds = CGRectMake(0, 0, barWidth, [self heightAtIndex:i]);
-            bar.transform = CATransform3DIdentity;
-            bar.opacity = 1;
-        } else {
-            CGFloat rotation = leadAngle - (CGFloat)i * (2 * M_PI / barCount);
-            bar.position = positions[i];
-            bar.bounds = CGRectMake(0, 0, barWidth, 5.6 * indicatorScale);
-            bar.transform = CATransform3DMakeRotation(rotation, 0, 0, 1);
-            bar.opacity = 1 - .66 * i / (barCount - 1);
-            if (morph) {
-                CAKeyframeAnimation *curl = [CAKeyframeAnimation animationWithKeyPath:@"position"];
-                curl.values = paths[i];
-                curl.beginTime = [bar convertTime:start fromLayer:_rotor];
-                curl.duration = morphDuration;
-                curl.timingFunction = CATransaction.animationTimingFunction;
-                [bar addAnimation:curl forKey:@"position"];
-                CABasicAnimation *tilt = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
-                tilt.fromValue = @0;
-                tilt.toValue = @(rotation);
-                tilt.beginTime = curl.beginTime;
-                tilt.duration = morphDuration;
-                tilt.timingFunction = curl.timingFunction;
-                [bar removeAnimationForKey:@"transform"];
-                [bar addAnimation:tilt forKey:@"transform"];
+    if (_mode == WavePending) {
+        for (int frame=morph?0:frames; frame<=frames; frame++) {
+            CGFloat t=frame/(CGFloat)frames;
+            CGFloat head=closed*smoothStep(t)+(2*M_PI*12.8/revolutionDuration)*morphDuration*t*t*(t-1);
+            CGFloat gap=7+(ringGap-7)*smoothStep(head/closed);
+            TrailSample poses[barCount];
+            CGFloat minX=CGFLOAT_MAX,maxX=-CGFLOAT_MAX,minY=CGFLOAT_MAX,maxY=-CGFLOAT_MAX;
+            for (int i=0; i<barCount; i++) {
+                poses[i]=sampleTrail(head-(7-i)*gap);
+                minX=MIN(minX,poses[i].x); maxX=MAX(maxX,poses[i].x);
+                minY=MIN(minY,poses[i].y); maxY=MAX(maxY,poses[i].y);
             }
+            for (int i=0; i<barCount; i++) {
+                TrailSample p=poses[i];
+                CGPoint pos=CGPointMake(center.x+(p.x-(minX+maxX)/2)*routeScale,
+                                        center.y-(p.y-(minY+maxY)/2)*routeScale);
+                CGFloat angle=previousAngles[i]+remainder(-p.angle-previousAngles[i],2*M_PI);
+                previousAngles[i]=angle;
+                CGFloat height=initialHeights[i]+(7.2*routeScale-initialHeights[i])*smoothStep((head-(7-i)*gap)/entry);
+                for (int j=0; j<barCount; j++) {
+                    CGFloat dx=poses[j].x-p.x,dy=poses[j].y-p.y,d=hypot(dx,dy);
+                    if (d<.001) continue;
+                    CGFloat projection=fabs((-dx*sin(p.angle)+dy*cos(p.angle))/d);
+                    if (projection>.001) height=MIN(height,barWidth+MAX(0,d*routeScale-barWidth-1.5*routeScale)/projection);
+                }
+                CGRect bounds=CGRectMake(0,0,barWidth,height);
+                if (morph) {
+                    [positions[i] addObject:[NSValue valueWithPoint:pos]];
+                    [angles[i] addObject:@(angle)];
+                    [sizes[i] addObject:[NSValue valueWithRect:bounds]];
+                }
+                if (frame!=frames) continue;
+                CALayer *bar=_bars[i];
+                bar.position=pos; bar.transform=CATransform3DMakeRotation(angle,0,0,1);
+                bar.bounds=bounds; bar.opacity=1-.55*i/7.;
+                if (morph) {
+                    NSDictionary *tracks=@{@"position":positions[i],@"transform.rotation.z":angles[i],@"bounds":sizes[i]};
+                    for (NSString *key in tracks) {
+                        CAKeyframeAnimation *animation=[CAKeyframeAnimation animationWithKeyPath:key];
+                        animation.values=tracks[key]; animation.duration=morphDuration;
+                        animation.beginTime=[bar convertTime:start fromLayer:_rotor];
+                        [bar addAnimation:animation forKey:key];
+                    }
+                    CABasicAnimation *fade=[CABasicAnimation animationWithKeyPath:@"opacity"];
+                    fade.fromValue=@1; fade.toValue=@(bar.opacity); fade.duration=morphDuration;
+                    [bar addAnimation:fade forKey:@"opacity"];
+                }
+            }
+        }
+        if (!_reduceMotion) {
+            CABasicAnimation *spin=[CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+            spin.fromValue=@0; spin.toValue=@(-2*M_PI); spin.duration=revolutionDuration;
+            spin.repeatCount=HUGE_VALF; spin.beginTime=start+(morph?morphDuration:0);
+            spin.timingFunction=[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+            [_rotor addAnimation:spin forKey:@"spin"];
         }
     }
     [CATransaction commit];
-    if (_mode == WavePending && !_reduceMotion) {
-        if (morph) {
-            CABasicAnimation *ramp = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
-            ramp.fromValue = @0;
-            ramp.toValue = @(-leadAngle);
-            ramp.duration = spinUpDuration;
-            ramp.beginTime = start + morphDuration - spinUpDuration;
-            // A quadratic angle curve reaches the loop’s angular velocity at the handoff.
-            ramp.timingFunction = [CAMediaTimingFunction functionWithControlPoints:1.0/3 :0 :2.0/3 :1.0/3];
-            [_rotor addAnimation:ramp forKey:@"spinUp"];
-        }
-        CABasicAnimation *spin = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
-        spin.fromValue = @(-leadAngle);
-        spin.toValue = @(-leadAngle - 2 * M_PI);
-        spin.duration = revolutionDuration;
-        spin.beginTime = start + (morph ? morphDuration : 0);
-        spin.repeatCount = HUGE_VALF;
-        spin.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
-        [_rotor addAnimation:spin forKey:@"spin"];
-    }
 }
 
 - (void)setMode:(WaveMode)mode {
