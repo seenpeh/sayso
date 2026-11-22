@@ -5,6 +5,7 @@
 #import "WhisperEngine.h"
 #import "PhraseCapture.h"
 #import "RecordingIndicator.h"
+#import "SaysoStyle.h"
 #import "ShortcutGesture.h"
 #import "ReleaseUpdater.h"
 #import <ApplicationServices/ApplicationServices.h>
@@ -67,6 +68,15 @@ static NSStackView *Stack(NSUserInterfaceLayoutOrientation orientation, NSArray<
     stack.orientation = orientation;
     stack.spacing = spacing;
     return stack;
+}
+
+static NSStackView *Column(NSArray<NSView *> *views, CGFloat spacing) {
+    NSStackView *column = Stack(NSUserInterfaceLayoutOrientationVertical, views, spacing);
+    column.alignment = NSLayoutAttributeLeading;
+    for (NSView *view in views) {
+        [view.widthAnchor constraintEqualToAnchor:column.widthAnchor].active = YES;
+    }
+    return column;
 }
 
 static NSTextField *Label(NSString *text, CGFloat size, NSFontWeight weight, NSColor *color) {
@@ -165,7 +175,7 @@ static NSString *ShortcutProblem(UInt32 key, UInt32 mods, NSString *title, Gestu
 }
 @end
 
-@interface VoiceKey : NSObject <NSApplicationDelegate, NSWindowDelegate, NSURLSessionDataDelegate>
+@interface VoiceKey : NSObject <NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSURLSessionDataDelegate>
 @property Phase phase;
 @property (strong) ShortcutGesture *gesture;
 @property BOOL holding;
@@ -190,9 +200,13 @@ static NSString *ShortcutProblem(UInt32 key, UInt32 mods, NSString *title, Gestu
 @property UInt32 shortcutModifiers;
 @property (copy) NSString *shortcutTitle;
 @property (strong) NSWindow *settingsWindow;
+@property (strong) NSTableView *settingsNav;
+@property (strong) NSTabView *settingsTabs;
+@property (strong) NSTextField *modeHint;
+@property (strong) VoiceCard *voiceCard;
 @property (strong) ShortcutButton *shortcutButton;
 @property (strong) NSTextField *shortcutMessage;
-@property (strong) NSButton *loginButton;
+@property (strong) NSSwitch *loginButton;
 @property (strong) NSTextField *loginMessage;
 @property (strong) NSButton *loginSettingsButton;
 @property (strong) NSPopUpButton *settingsPicker;
@@ -269,15 +283,15 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.recognitionQueue = dispatch_queue_create("sayso.recognition", DISPATCH_QUEUE_SERIAL);
     self.pending = [NSMutableArray array];
     self.updater = [ReleaseUpdater new];
+    self.gesture = [ShortcutGesture new];
+    [self loadShortcutSettings:defaults];
+    [self saveShortcutSettings];
     self.statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSSquareStatusItemLength];
     self.statusItem.button.target = self;
     self.statusItem.button.action = @selector(togglePopover:);
     [self buildPopover];
 
     self.indicator = [RecordingIndicator new];
-    self.gesture = [ShortcutGesture new];
-    [self loadShortcutSettings:defaults];
-    [self saveShortcutSettings];
     __weak VoiceKey *owner = self;
     self.gesture.activate = ^{
         VoiceKey *app = owner;
@@ -513,7 +527,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     [self refresh];
 }
 
-- (void)soundSetting:(NSButton *)sender {
+- (void)soundSetting:(NSSwitch *)sender {
     [NSUserDefaults.standardUserDefaults setBool:sender.state == NSControlStateValueOn forKey:@"recordingSounds"];
 }
 
@@ -524,9 +538,52 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     [sound play];
 }
 
+static NSTextField *Caption(NSString *text) {
+    NSTextField *label = [NSTextField wrappingLabelWithString:text];
+    label.font = [NSFont systemFontOfSize:12];
+    label.textColor = NSColor.secondaryLabelColor;
+    return label;
+}
+
+static NSView *FlexibleSpace(void) {
+    NSView *space = [NSView new];
+    [space setContentHuggingPriority:1 forOrientation:NSLayoutConstraintOrientationHorizontal];
+    return space;
+}
+
+static NSStackView *PreferenceRow(NSString *title, NSView *control) {
+    NSTextField *name = Label(title, 13, NSFontWeightMedium, NSColor.labelColor);
+    return Stack(NSUserInterfaceLayoutOrientationHorizontal, @[name, FlexibleSpace(), control], 10);
+}
+
+static NSBox *Rule(void) {
+    NSBox *line = [NSBox new];
+    line.boxType = NSBoxSeparator;
+    return line;
+}
+
+static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
+    NSBox *box = [NSBox new];
+    box.boxType = NSBoxCustom;
+    box.titlePosition = NSNoTitle;
+    box.contentViewMargins = NSZeroSize;
+    box.cornerRadius = 12;
+    box.borderWidth = 1;
+    box.borderColor = NSColor.separatorColor;
+    box.fillColor = NSColor.controlBackgroundColor;
+    NSStackView *stack = Column(views, 10);
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [box.contentView addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.leadingAnchor constraintEqualToAnchor:box.contentView.leadingAnchor constant:16],
+        [stack.trailingAnchor constraintEqualToAnchor:box.contentView.trailingAnchor constant:-16],
+        [stack.topAnchor constraintEqualToAnchor:box.contentView.topAnchor constant:14],
+        [stack.bottomAnchor constraintEqualToAnchor:box.contentView.bottomAnchor constant:-14]
+    ]];
+    return box;
+}
+
 - (void)buildSettings {
-    NSColor *primary = NSColor.labelColor;
-    NSColor *secondary = NSColor.secondaryLabelColor;
     self.shortcutButton = [[ShortcutButton alloc] initWithFrame:NSZeroRect];
     self.shortcutButton.title = self.shortcutTitle;
     self.shortcutButton.bezelStyle = NSBezelStyleRounded;
@@ -534,47 +591,9 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.shortcutButton.action = @selector(captureShortcut:);
     [self.shortcutButton setAccessibilityLabel:@"Change global recording shortcut"];
     self.resetButton = [self button:@"Reset" action:@selector(resetShortcut:)];
-    NSStackView *shortcutRow = Stack(NSUserInterfaceLayoutOrientationHorizontal, @[self.shortcutButton, self.resetButton], 8);
-    self.shortcutMessage = Label(@"Click the shortcut, then press a new key combination.", 12, NSFontWeightRegular, secondary);
+    NSStackView *shortcut = Stack(NSUserInterfaceLayoutOrientationHorizontal, @[self.shortcutButton, self.resetButton], 5);
+    self.shortcutMessage = Caption(@"Click the shortcut, then press a new key combination.");
 
-    self.settingsPicker = [self newModelPicker];
-    self.settingsDownload = [self button:@"Download" action:@selector(downloadModel:)];
-    self.unloadButton = [self button:@"Unload" action:@selector(unloadModel:)];
-    self.removeButton = [self button:@"Move to Trash" action:@selector(removeModel:)];
-    NSStackView *modelRow = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-        @[self.settingsPicker, self.settingsDownload, self.unloadButton, self.removeButton], 7);
-    self.settingsModelStatus = [NSTextField wrappingLabelWithString:@""];
-    self.settingsModelStatus.font = [NSFont systemFontOfSize:12];
-    self.settingsModelStatus.textColor = secondary;
-    self.settingsProgress = [NSProgressIndicator new];
-    self.settingsProgress.indeterminate = NO;
-    self.settingsProgress.maxValue = 1;
-    self.settingsProgress.controlSize = NSControlSizeSmall;
-    [self.settingsProgress setAccessibilityLabel:@"Model download progress"];
-
-    self.loginButton = [NSButton checkboxWithTitle:@"Start Sayso at login" target:self action:@selector(toggleLogin:)];
-    self.loginSettingsButton = [self button:@"Open Login Items" action:@selector(openLoginSettings:)];
-    NSStackView *loginRow = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-        @[self.loginButton, self.loginSettingsButton], 8);
-    self.loginMessage = [NSTextField wrappingLabelWithString:@""];
-    self.loginMessage.font = [NSFont systemFontOfSize:12];
-    self.loginMessage.textColor = secondary;
-    self.languagePicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.languagePicker addItemsWithTitles:@[@"Detect language", @"Persian · فارسی"]];
-    [self.languagePicker setAccessibilityLabel:@"Spoken language"];
-    self.languagePicker.target = self;
-    self.languagePicker.action = @selector(changeLanguage:);
-    self.settingsUpdate = [self button:@"Check for Updates…" action:@selector(updateAction:)];
-    self.updateStatus = [NSTextField wrappingLabelWithString:@""];
-    self.updateStatus.textColor = secondary;
-    self.updateStatus.font = [NSFont systemFontOfSize:12];
-    NSStackView *languageRow = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-        @[Label(@"Spoken language", 12, NSFontWeightRegular, primary), self.languagePicker], 10);
-
-    NSTextField *shortcutHeading = Label(@"Global shortcut", 14, NSFontWeightSemibold, primary);
-    NSTextField *modelsHeading = Label(@"Local models", 14, NSFontWeightSemibold, primary);
-    NSTextField *generalHeading = Label(@"General", 14, NSFontWeightSemibold, primary);
-    self.uninstallButton = [self button:@"Uninstall Sayso…" action:@selector(uninstall:)];
     self.modePicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     [self.modePicker addItemsWithTitles:@[@"Toggle", @"Hold"]];
     self.gesturePicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -587,46 +606,171 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     }
     [self.modePicker setAccessibilityLabel:@"Recording mode"];
     [self.gesturePicker setAccessibilityLabel:@"Shortcut gesture"];
-    NSStackView *modeRow = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-        @[Label(@"Recording mode", 13, NSFontWeightRegular, primary), self.modePicker], 12);
-    NSStackView *gestureRow = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-        @[Label(@"Shortcut gesture", 13, NSFontWeightRegular, primary), self.gesturePicker], 12);
-    NSButton *sounds = [NSButton checkboxWithTitle:@"Play soft recording sounds" target:self action:@selector(soundSetting:)];
+    NSSwitch *sounds = [NSSwitch new];
+    sounds.target = self;
+    sounds.action = @selector(soundSetting:);
     sounds.state = [NSUserDefaults.standardUserDefaults boolForKey:@"recordingSounds"];
-    self.checkButton = [self button:@"Check for Updates…" action:@selector(checkUpdates:)];
-    NSStackView *updates = Stack(NSUserInterfaceLayoutOrientationHorizontal, @[self.checkButton, self.settingsUpdate], 8);
-    NSTabView *tabs = [NSTabView new];
-    NSArray *groups = @[@[modeRow, gestureRow, shortcutHeading, shortcutRow, self.shortcutMessage, sounds],
-                        @[modelsHeading, modelRow, languageRow, self.settingsModelStatus, self.settingsProgress],
-                        @[generalHeading, loginRow, self.loginMessage, updates, self.updateStatus, self.uninstallButton]];
-    NSArray *titles = @[@"Recording", @"Models", @"General"];
-    for (NSUInteger i = 0; i < groups.count; i++) {
-        NSTabViewItem *tab = [[NSTabViewItem alloc] initWithIdentifier:titles[i]];
-        tab.label = titles[i];
-        NSStackView *section = Stack(NSUserInterfaceLayoutOrientationVertical, groups[i], 12);
-        section.alignment = NSLayoutAttributeLeading;
-        section.translatesAutoresizingMaskIntoConstraints = NO;
-        tab.view = [NSView new];
-        [tab.view addSubview:section];
-        [section.leadingAnchor constraintEqualToAnchor:tab.view.leadingAnchor constant:18].active = YES;
-        [section.topAnchor constraintEqualToAnchor:tab.view.topAnchor constant:16].active = YES;
-        [tabs addTabViewItem:tab];
-    }
-    for (NSView *fullWidth in @[self.settingsModelStatus, self.settingsProgress, self.loginMessage, self.updateStatus]) {
-        [fullWidth.widthAnchor constraintEqualToConstant:510].active = YES;
-    }
+    [sounds setAccessibilityLabel:@"Recording sounds"];
+    self.modeHint = Caption(@"");
 
-    self.settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 660, 340)
-        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+    self.settingsPicker = [self newModelPicker];
+    self.settingsDownload = [self button:@"Download" action:@selector(downloadModel:)];
+    self.unloadButton = [self button:@"Unload" action:@selector(unloadModel:)];
+    self.removeButton = [self button:@"Move to Trash" action:@selector(removeModel:)];
+    NSStackView *modelActions = Stack(NSUserInterfaceLayoutOrientationHorizontal,
+        @[self.settingsDownload, self.unloadButton, self.removeButton, FlexibleSpace()], 6);
+    self.settingsModelStatus = Caption(@"");
+    self.settingsProgress = [NSProgressIndicator new];
+    self.settingsProgress.indeterminate = NO;
+    self.settingsProgress.maxValue = 1;
+    self.settingsProgress.controlSize = NSControlSizeSmall;
+    [self.settingsProgress setAccessibilityLabel:@"Model download progress"];
+    self.languagePicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.languagePicker addItemsWithTitles:@[@"Detect language", @"Persian · فارسی"]];
+    [self.languagePicker setAccessibilityLabel:@"Spoken language"];
+    self.languagePicker.target = self;
+    self.languagePicker.action = @selector(changeLanguage:);
+
+    self.loginButton = [NSSwitch new];
+    self.loginButton.target = self;
+    self.loginButton.action = @selector(toggleLogin:);
+    [self.loginButton setAccessibilityLabel:@"Start Sayso at login"];
+    self.loginSettingsButton = [self button:@"Open Login Items…" action:@selector(openLoginSettings:)];
+    self.loginMessage = Caption(@"");
+    self.checkButton = [self button:@"Check for Updates…" action:@selector(checkUpdates:)];
+    self.settingsUpdate = [self button:@"Install update" action:@selector(updateAction:)];
+    self.updateStatus = Caption(@"");
+    self.uninstallButton = [self button:@"Uninstall Sayso…" action:@selector(uninstall:)];
+    NSString *version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
+    NSStackView *updates = Stack(NSUserInterfaceLayoutOrientationHorizontal,
+        @[self.checkButton, self.settingsUpdate, FlexibleSpace()], 6);
+
+    NSArray *groups = @[
+        @[PreferenceGroup(@[PreferenceRow(@"Recording mode", self.modePicker), self.modeHint, Rule(),
+                            PreferenceRow(@"Shortcut gesture", self.gesturePicker)]),
+          PreferenceGroup(@[PreferenceRow(@"Global shortcut", shortcut), self.shortcutMessage]),
+          PreferenceGroup(@[PreferenceRow(@"Recording sounds", sounds)])],
+        @[PreferenceGroup(@[PreferenceRow(@"Local model", self.settingsPicker), self.settingsModelStatus,
+                            self.settingsProgress, modelActions]),
+          PreferenceGroup(@[PreferenceRow(@"Spoken language", self.languagePicker)])],
+        @[PreferenceGroup(@[PreferenceRow(@"Start Sayso at login", self.loginButton), self.loginMessage,
+                            Stack(NSUserInterfaceLayoutOrientationHorizontal, @[self.loginSettingsButton, FlexibleSpace()], 4)]),
+          PreferenceGroup(@[Label([@"Sayso " stringByAppendingString:version], 14, NSFontWeightSemibold, NSColor.labelColor),
+                            self.updateStatus, updates]),
+          Stack(NSUserInterfaceLayoutOrientationHorizontal, @[FlexibleSpace(), self.uninstallButton], 0)]
+    ];
+
+    self.settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 730, 468)
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskFullSizeContentView
         backing:NSBackingStoreBuffered defer:NO];
     self.settingsWindow.title = @"Sayso Settings";
+    self.settingsWindow.titleVisibility = NSWindowTitleHidden;
+    self.settingsWindow.titlebarAppearsTransparent = YES;
+    self.settingsWindow.movableByWindowBackground = YES;
     self.settingsWindow.releasedWhenClosed = NO;
     self.settingsWindow.delegate = self;
     NSView *content = self.settingsWindow.contentView;
-    tabs.frame = NSInsetRect(content.bounds, 12, 10);
-    tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    [content addSubview:tabs];
+    content.wantsLayer = YES;
+
+    NSVisualEffectView *sidebar = [NSVisualEffectView new];
+    sidebar.material = NSVisualEffectMaterialSidebar;
+    sidebar.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+    sidebar.translatesAutoresizingMaskIntoConstraints = NO;
+    [content addSubview:sidebar];
+    NSStackView *brand = Stack(NSUserInterfaceLayoutOrientationHorizontal,
+        @[SaysoMark(30), Label(@"Sayso", 19, NSFontWeightSemibold, NSColor.labelColor)], 9);
+    [sidebar addSubview:brand];
+    brand.translatesAutoresizingMaskIntoConstraints = NO;
+    NSArray *titles = @[@"Recording", @"Models", @"General"];
+    self.settingsNav = [NSTableView new];
+    self.settingsNav.style = NSTableViewStyleSourceList;
+    self.settingsNav.backgroundColor = NSColor.clearColor;
+    self.settingsNav.headerView = nil;
+    self.settingsNav.rowHeight = 33;
+    self.settingsNav.intercellSpacing = NSMakeSize(0, 3);
+    self.settingsNav.allowsEmptySelection = NO;
+    self.settingsNav.dataSource = self;
+    self.settingsNav.delegate = self;
+    [self.settingsNav setAccessibilityLabel:@"Settings sections"];
+    NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:@"section"];
+    column.width = 152;
+    [self.settingsNav addTableColumn:column];
+    NSScrollView *navScroll = [NSScrollView new];
+    navScroll.drawsBackground = NO;
+    navScroll.documentView = self.settingsNav;
+    navScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [sidebar addSubview:navScroll];
+
+    self.settingsTabs = [NSTabView new];
+    self.settingsTabs.tabViewType = NSNoTabsNoBorder;
+    self.settingsTabs.drawsBackground = NO;
+    self.settingsTabs.translatesAutoresizingMaskIntoConstraints = NO;
+    for (NSUInteger i = 0; i < groups.count; i++) {
+        NSString *title = titles[i];
+        NSTextField *heading = Label(title, 27, NSFontWeightBold, NSColor.labelColor);
+        NSStackView *section = Column([@[heading] arrayByAddingObjectsFromArray:groups[i]], 12);
+        [section setCustomSpacing:20 afterView:heading];
+        section.translatesAutoresizingMaskIntoConstraints = NO;
+        NSTabViewItem *tab = [[NSTabViewItem alloc] initWithIdentifier:title];
+        tab.label = title;
+        tab.view = [NSView new];
+        [tab.view addSubview:section];
+        [NSLayoutConstraint activateConstraints:@[
+            [section.leadingAnchor constraintEqualToAnchor:tab.view.leadingAnchor constant:28],
+            [section.trailingAnchor constraintEqualToAnchor:tab.view.trailingAnchor constant:-28],
+            [section.topAnchor constraintEqualToAnchor:tab.view.topAnchor constant:46]
+        ]];
+        [self.settingsTabs addTabViewItem:tab];
+    }
+    [content addSubview:self.settingsTabs];
+    [NSLayoutConstraint activateConstraints:@[
+        [sidebar.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
+        [sidebar.topAnchor constraintEqualToAnchor:content.topAnchor],
+        [sidebar.bottomAnchor constraintEqualToAnchor:content.bottomAnchor],
+        [sidebar.widthAnchor constraintEqualToConstant:180],
+        [brand.leadingAnchor constraintEqualToAnchor:sidebar.leadingAnchor constant:20],
+        [brand.topAnchor constraintEqualToAnchor:sidebar.topAnchor constant:46],
+        [navScroll.leadingAnchor constraintEqualToAnchor:sidebar.leadingAnchor constant:4],
+        [navScroll.trailingAnchor constraintEqualToAnchor:sidebar.trailingAnchor constant:-4],
+        [navScroll.topAnchor constraintEqualToAnchor:brand.bottomAnchor constant:18],
+        [navScroll.bottomAnchor constraintEqualToAnchor:sidebar.bottomAnchor],
+        [self.settingsTabs.leadingAnchor constraintEqualToAnchor:sidebar.trailingAnchor],
+        [self.settingsTabs.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+        [self.settingsTabs.topAnchor constraintEqualToAnchor:content.topAnchor],
+        [self.settingsTabs.bottomAnchor constraintEqualToAnchor:content.bottomAnchor]
+    ]];
+    [self.settingsNav reloadData];
+    [self.settingsNav selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
     [self.settingsWindow center];
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView { return 3; }
+
+- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)column row:(NSInteger)row {
+    NSArray *icons = @[@"waveform", @"square.3.layers.3d", @"gearshape"];
+    NSString *title = [self.settingsTabs tabViewItemAtIndex:row].label;
+    NSTableCellView *cell = [NSTableCellView new];
+    NSImageView *icon = [NSImageView imageViewWithImage:Symbol(icons[row], nil, 15)];
+    [icon.widthAnchor constraintEqualToConstant:19].active = YES;
+    NSTextField *name = Label(title, 13, NSFontWeightMedium, NSColor.labelColor);
+    cell.textField = name;
+    cell.imageView = icon;
+    NSStackView *rowView = Stack(NSUserInterfaceLayoutOrientationHorizontal, @[icon, name], 8);
+    rowView.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell addSubview:rowView];
+    [rowView.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:5].active = YES;
+    [rowView.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor].active = YES;
+    return cell;
+}
+
+- (void)tableViewSelectionDidChange:(NSNotification *)notification {
+    NSInteger row = self.settingsNav.selectedRow;
+    if (row < 0 || row >= self.settingsTabs.numberOfTabViewItems) return;
+    NSInteger previous = [self.settingsTabs indexOfTabViewItem:self.settingsTabs.selectedTabViewItem];
+    if (previous == row) return;
+    if (self.shortcutButton.capture) [self endShortcutCapture:@"Click the shortcut to change it."];
+    [self.settingsTabs selectTabViewItemAtIndex:row];
+    SaysoReveal(self.settingsTabs.selectedTabViewItem.view, row > previous ? 7 : -7);
 }
 
 - (void)captureShortcut:(id)sender {
@@ -741,17 +885,19 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     SMAppServiceStatus status = SMAppService.mainAppService.status;
     self.loginButton.state = status == SMAppServiceStatusEnabled || status == SMAppServiceStatusRequiresApproval
         ? NSControlStateValueOn : NSControlStateValueOff;
+    self.loginMessage.hidden = status != SMAppServiceStatusRequiresApproval;
     self.loginMessage.stringValue = status == SMAppServiceStatusRequiresApproval
         ? @"Allow Sayso in Login Items to finish enabling this option." : @"";
 }
 
-- (void)toggleLogin:(NSButton *)sender {
+- (void)toggleLogin:(NSSwitch *)sender {
     NSError *error = nil;
     SMAppService *service = SMAppService.mainAppService;
     BOOL ok = sender.state == NSControlStateValueOn ? [service registerAndReturnError:&error]
                                                     : [service unregisterAndReturnError:&error];
     [self updateLoginControls];
     if (!ok && service.status != SMAppServiceStatusRequiresApproval) {
+        self.loginMessage.hidden = NO;
         self.loginMessage.stringValue = error.localizedDescription ?: @"Could not change the login item.";
     }
 }
@@ -765,90 +911,84 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 }
 
 - (void)buildPopover {
-    NSColor *primary = NSColor.labelColor;
+    const CGFloat width = 330;
     NSColor *secondary = NSColor.secondaryLabelColor;
-    NSImageView *brand = [NSImageView imageViewWithImage:Symbol(@"waveform", @"Sayso", 17)];
-    brand.contentTintColor = NSColor.controlAccentColor;
-    self.keyLabel = Label(self.shortcutTitle, 12, NSFontWeightMedium, secondary);
+    self.keyLabel = Label(@"", 12, NSFontWeightMedium, secondary);
     self.keyLabel.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightMedium];
-    NSView *spacer = [NSView new];
     NSStackView *header = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-        @[brand, Label(@"Sayso", 18, NSFontWeightSemibold, primary), spacer, self.keyLabel], 8);
+        @[SaysoMark(28), Label(@"Sayso", 19, NSFontWeightSemibold, NSColor.labelColor), FlexibleSpace(), self.keyLabel], 8);
 
+    self.voiceCard = [VoiceCard new];
     self.stateImage = [NSImageView new];
-    self.headline = Label(@"", 18, NSFontWeightSemibold, primary);
-    NSStackView *state = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-                               @[self.stateImage, self.headline], 7);
+    self.headline = [NSTextField wrappingLabelWithString:@""];
+    self.headline.font = [NSFont systemFontOfSize:23 weight:NSFontWeightSemibold];
+    self.headline.textColor = NSColor.whiteColor;
     self.detail = [NSTextField wrappingLabelWithString:@""];
-    self.detail.font = [NSFont systemFontOfSize:12];
-    self.detail.textColor = secondary;
-    self.detail.maximumNumberOfLines = 4;
-
-    NSStackView *statusText = Stack(NSUserInterfaceLayoutOrientationVertical, @[state, self.detail], 5);
-    statusText.alignment = NSLayoutAttributeLeading;
-    [self.detail.widthAnchor constraintEqualToConstant:312].active = YES;
-    NSBox *statusCard = [NSBox new];
-    statusCard.boxType = NSBoxCustom;
-    statusCard.titlePosition = NSNoTitle;
-    statusCard.cornerRadius = 10;
-    statusCard.borderWidth = 0;
-    statusCard.fillColor = NSColor.controlBackgroundColor;
-    NSView *cardContent = statusCard.contentView;
-    [cardContent addSubview:statusText];
-    statusText.translatesAutoresizingMaskIntoConstraints = NO;
+    self.detail.font = [NSFont systemFontOfSize:13];
+    self.detail.textColor = [NSColor colorWithSRGBRed:.87 green:.86 blue:.95 alpha:1];
+    for (NSView *view in @[self.stateImage, self.headline, self.detail]) {
+        view.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.voiceCard addSubview:view];
+    }
     [NSLayoutConstraint activateConstraints:@[
-        [statusText.leadingAnchor constraintEqualToAnchor:cardContent.leadingAnchor constant:14],
-        [statusText.topAnchor constraintEqualToAnchor:cardContent.topAnchor constant:12],
-        [statusText.bottomAnchor constraintEqualToAnchor:cardContent.bottomAnchor constant:-12]
+        [self.stateImage.leadingAnchor constraintEqualToAnchor:self.voiceCard.leadingAnchor constant:17],
+        [self.stateImage.topAnchor constraintEqualToAnchor:self.voiceCard.topAnchor constant:16],
+        [self.stateImage.widthAnchor constraintEqualToConstant:23],
+        [self.stateImage.heightAnchor constraintEqualToConstant:23],
+        [self.headline.leadingAnchor constraintEqualToAnchor:self.voiceCard.leadingAnchor constant:17],
+        [self.headline.trailingAnchor constraintEqualToAnchor:self.voiceCard.trailingAnchor constant:-17],
+        [self.headline.topAnchor constraintEqualToAnchor:self.voiceCard.topAnchor constant:51],
+        [self.detail.leadingAnchor constraintEqualToAnchor:self.headline.leadingAnchor],
+        [self.detail.trailingAnchor constraintEqualToAnchor:self.headline.trailingAnchor],
+        [self.detail.topAnchor constraintEqualToAnchor:self.headline.bottomAnchor constant:4],
+        [self.detail.bottomAnchor constraintEqualToAnchor:self.voiceCard.bottomAnchor constant:-16]
     ]];
 
-    self.recordButton = [self button:@"Record" action:@selector(toggleRecording:)];
-    self.recordButton.controlSize = NSControlSizeLarge;
-    self.recordButton.imagePosition = NSImageLeading;
-    self.recordButton.image = Symbol(@"mic.fill", @"", 14);
-    self.updateButton = [self button:@"Install Update…" action:@selector(updateAction:)];
     self.modelPicker = [self newModelPicker];
-    self.downloadButton = [self button:@"Download" action:@selector(downloadModel:)];
-    NSStackView *modelControls = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-                                       @[self.modelPicker, self.downloadButton], 8);
-    self.modelLabel = Label(@"", 12, NSFontWeightRegular, secondary);
+    NSStackView *modelRow = PreferenceRow(@"Local model", self.modelPicker);
+    self.modelLabel = Caption(@"");
     self.progress = [NSProgressIndicator new];
     self.progress.indeterminate = NO;
     self.progress.controlSize = NSControlSizeSmall;
     self.progress.maxValue = 1;
     [self.progress setAccessibilityLabel:@"Model download progress"];
 
-    NSButton *quit = [self button:@"Quit Sayso" action:@selector(quit:)];
-    quit.bordered = NO;
-    quit.font = [NSFont systemFontOfSize:12];
-    NSButton *settings = [self button:@"Settings…" action:@selector(showSettings:)];
-    NSStackView *footer = Stack(NSUserInterfaceLayoutOrientationHorizontal, @[settings, quit], 10);
-    NSBox *line = [NSBox new];
-    line.boxType = NSBoxSeparator;
-
-    self.page = Stack(NSUserInterfaceLayoutOrientationVertical,
-        @[header, statusCard, self.recordButton, line,
-          Label(@"Local model", 12, NSFontWeightSemibold, primary), modelControls,
-          self.modelLabel, self.progress, self.updateButton, footer], 9);
-    self.page.alignment = NSLayoutAttributeLeading;
-    self.page.detachesHiddenViews = YES;
-    [self.page setCustomSpacing:15 afterView:header];
-    [self.page setCustomSpacing:12 afterView:self.recordButton];
-    [self.page setCustomSpacing:12 afterView:line];
-    [self.page setCustomSpacing:4 afterView:modelControls];
-    for (NSView *fullWidth in @[header, statusCard, self.recordButton, line, self.progress]) {
-        [fullWidth.widthAnchor constraintEqualToConstant:344].active = YES;
+    self.recordButton = [DictationActionButton buttonWithTitle:@"Start dictation" target:self action:@selector(toggleRecording:)];
+    self.downloadButton = [DictationActionButton buttonWithTitle:@"Download model" target:self action:@selector(downloadModel:)];
+    for (NSButton *button in @[self.recordButton, self.downloadButton]) {
+        button.controlSize = NSControlSizeLarge;
+        button.imagePosition = NSImageLeading;
+        button.bordered = NO;
+        button.focusRingType = NSFocusRingTypeExterior;
     }
-
-    NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 280)];
+    self.recordButton.image = Symbol(@"mic.fill", nil, 13);
+    self.updateButton = [self button:@"Install update…" action:@selector(updateAction:)];
+    NSButton *settings = [self button:@"Settings…" action:@selector(showSettings:)];
+    settings.image = Symbol(@"gearshape", nil, 12);
+    settings.imagePosition = NSImageLeading;
+    NSButton *quit = [self button:@"Quit Sayso" action:@selector(quit:)];
+    for (NSButton *button in @[settings, quit]) {
+        button.bordered = NO;
+        button.font = [NSFont systemFontOfSize:12];
+    }
+    NSStackView *footer = Stack(NSUserInterfaceLayoutOrientationHorizontal, @[settings, FlexibleSpace(), quit], 8);
+    NSBox *line = Rule();
+    self.page = Column(@[header, self.voiceCard, modelRow, self.modelLabel, self.progress, self.downloadButton, self.recordButton,
+          self.updateButton, line, footer], 9);
+    [self.page setCustomSpacing:14 afterView:header];
+    [self.page setCustomSpacing:13 afterView:self.voiceCard];
+    [self.page setCustomSpacing:2 afterView:modelRow];
+    [self.page setCustomSpacing:13 afterView:self.modelLabel];
     self.page.translatesAutoresizingMaskIntoConstraints = NO;
+    NSViewController *controller = [NSViewController new];
+    NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width + 32, 350)];
+    controller.view = content;
     [content addSubview:self.page];
     [NSLayoutConstraint activateConstraints:@[
         [self.page.topAnchor constraintEqualToAnchor:content.topAnchor constant:16],
-        [self.page.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:18]
+        [self.page.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:16],
+        [self.page.widthAnchor constraintEqualToConstant:width]
     ]];
-    NSViewController *controller = [NSViewController new];
-    controller.view = content;
     self.popover = [NSPopover new];
     self.popover.behavior = NSPopoverBehaviorTransient;
     self.popover.contentViewController = controller;
@@ -860,8 +1000,10 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
         NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
         if (front.processIdentifier != NSRunningApplication.currentApplication.processIdentifier)
             self.popoverDestination = front;
+        self.popover.animates = !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
         [self.popover showRelativeToRect:self.statusItem.button.bounds ofView:self.statusItem.button
                           preferredEdge:NSRectEdgeMinY];
+        [self.voiceCard revealWave];
     }
 }
 
@@ -904,13 +1046,13 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     BOOL installed = [self modelExists];
     BOOL downloading = self.phase == Downloading || self.phase == CancelingDownload || self.phase == Verifying;
     BOOL denied = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] == AVAuthorizationStatusDenied;
-    NSString *title = installed ? @"Ready to dictate" : @"Download a model first";
-    NSString *subtitle = installed ? @"Place the cursor in a text field, then press the shortcut. Pause briefly to type each phrase." :
-                                    @"Once downloaded, transcription runs on this Mac.";
-    NSString *stateSymbol = installed ? @"circle.inset.filled" : @"arrow.down.circle";
+    NSString *title = installed ? @"Ready to dictate" : @"Set up dictation";
+    NSString *subtitle = installed ? @"Place your cursor in a text field and use your recording shortcut." :
+                                    @"Download a speech model to transcribe on your Mac.";
+    NSString *stateSymbol = installed ? @"waveform" : @"arrow.down.circle";
     if (!hasSelection) {
         title = @"No active model";
-        subtitle = @"Select a model to record.";
+        subtitle = @"Choose a local model below to set up dictation.";
         stateSymbol = @"waveform";
     }
     NSString *menuSymbol = @"waveform";
@@ -959,20 +1101,12 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 
     NSString *menuDescription = self.phase == Recording ? @"Sayso, listening. Click to stop dictation." :
                                 self.phase == Transcribing ? @"Sayso, transcribing" : @"Sayso";
-    NSStatusBarButton *indicator = self.statusItem.button;
-    if (self.phase == Recording && !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) {
-        CGFloat opacity = ((NSInteger)(-self.started.timeIntervalSinceNow * 2) % 2) ? 0.55 : 1;
-        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
-            context.duration = 0.42;
-            indicator.animator.alphaValue = opacity;
-        } completionHandler:nil];
-    } else indicator.animator.alphaValue = 1;
     self.statusItem.button.image = Symbol(menuSymbol, menuDescription, 14);
     self.statusItem.button.toolTip = menuDescription;
     [self.statusItem.button setAccessibilityLabel:menuDescription];
     self.statusItem.button.contentTintColor = self.phase == Recording ? tint : nil;
-    self.stateImage.image = Symbol(stateSymbol, @"", 13);
-    self.stateImage.contentTintColor = tint;
+    self.stateImage.image = Symbol(stateSymbol, nil, 19);
+    self.stateImage.contentTintColor = self.failed && self.phase == Idle ? NSColor.systemYellowColor : NSColor.whiteColor;
     self.headline.stringValue = title;
     self.detail.stringValue = subtitle;
     self.keyLabel.stringValue = self.gesture.kind == TapGesture ? self.shortcutTitle :
@@ -983,7 +1117,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.recordButton.title = self.phase == Recording ? @"Stop dictation" :
                               denied ? @"Microphone Settings" : !AXIsProcessTrusted() ? @"Enable keyboard access…" : @"Start dictation";
     self.recordButton.enabled = (installed && self.phase == Idle && !self.updater.installing) || self.phase == Recording;
-    self.recordButton.bezelColor = self.recordButton.enabled ? NSColor.controlAccentColor : nil;
+    self.recordButton.hidden = !installed || downloading;
     BOOL available = self.phase == Idle && !self.updater.installing;
     self.modelPicker.enabled = self.settingsPicker.enabled = available;
     self.languagePicker.enabled = available && !PersianOnly(self.selectedModel);
@@ -995,8 +1129,12 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     self.updateButton.title = self.updater.installing ? @"Installing update…" : updateTitle;
     self.settingsUpdate.title = self.updateButton.title;
     self.settingsUpdate.hidden = !self.updater.availableVersion;
+    self.checkButton.hidden = self.updater.availableVersion != nil;
     self.checkButton.enabled = available && !self.updater.checking;
     self.checkButton.title = self.updater.checking ? @"Checking…" : @"Check for Updates…";
+    self.modeHint.stringValue = self.gesture.mode == HoldRecording ?
+        @"Keep the shortcut pressed while speaking. Release to finish." :
+        @"Use your shortcut once to start and again to finish.";
     self.modePicker.enabled = self.gesturePicker.enabled = available;
     self.shortcutButton.enabled = self.resetButton.enabled = available;
     self.updateButton.enabled = self.settingsUpdate.enabled = available && !self.updater.checking;
@@ -1011,7 +1149,10 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     [self.settingsPicker selectItemAtIndex:pickerIndex];
     self.downloadButton.hidden = !hasSelection || (installed && !downloading);
     BOOL resumable = hasSelection && !installed && [self partialSize] > 0;
-    self.downloadButton.title = self.phase == Downloading ? @"Pause" : resumable ? @"Resume" : @"Download";
+    self.downloadButton.title = self.phase == Verifying ? @"Verifying model…" : self.phase == CancelingDownload ?
+        @"Pausing download…" : self.phase == Downloading ? @"Pause download" : resumable ? @"Resume download" : @"Download model";
+    self.settingsDownload.title = self.downloadButton.title;
+    self.downloadButton.image = Symbol(self.phase == Downloading ? @"pause.fill" : @"arrow.down.circle", nil, 13);
     self.uninstallButton.enabled = available;
     self.downloadButton.enabled = available || self.phase == Downloading;
     if (downloading) self.modelLabel.stringValue = [NSString stringWithFormat:@"%.0f%% · %s",
@@ -1021,15 +1162,17 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
             @"Multilingual";
         self.modelLabel.stringValue = [NSString stringWithFormat:@"%@ · %s%@", description,
             models[self.selectedModel].size, installed ? @" · Installed" : @""];
-    } else self.modelLabel.stringValue = @"Choose a model to start dictating.";
+    } else self.modelLabel.stringValue = @"";
+    self.modelLabel.hidden = !hasSelection;
     self.progress.hidden = !downloading;
     self.progress.doubleValue = self.downloadedFraction;
-    self.popover.contentSize = NSMakeSize(380, ceil(self.page.fittingSize.height) + 32);
+    [self.page layoutSubtreeIfNeeded];
+    self.popover.contentSize = NSMakeSize(NSWidth(self.page.frame) + 32, ceil(self.page.fittingSize.height) + 32);
     self.settingsDownload.hidden = self.downloadButton.hidden;
     self.settingsDownload.enabled = !self.downloadButton.hidden && self.downloadButton.enabled;
-    self.settingsDownload.title = self.downloadButton.title;
     self.unloadButton.enabled = hasSelection && available;
     self.removeButton.enabled = installed && available;
+    self.settingsModelStatus.hidden = !hasSelection && !self.notice;
     self.settingsModelStatus.stringValue = self.notice && (self.failed || !installed)
         ? self.notice : self.modelLabel.stringValue;
     self.settingsProgress.hidden = !downloading;
@@ -1546,5 +1689,4 @@ int main(int argc, const char *argv[]) {
         application.delegate = delegate;
         [application run];
     }
-    return 0;
-}
+    

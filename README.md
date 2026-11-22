@@ -41,9 +41,9 @@ Sayso checks the latest stable release on [GitHub](https://github.com/seenpeh/sa
 Install the Xcode Command Line Tools and run this on an Apple silicon Mac.
 
 ```sh
-./build.sh "$PWD/Sayso-1.6-macOS-arm64.zip"
+./build.sh "$PWD/Sayso-1.7-macOS-arm64.zip"
 ```
 
-To publish an update, bump the version and build number in `Resources/Info.plist`. Create a stable GitHub release with a matching numeric tag such as `v1.6` and attach the build as `Sayso-1.6-macOS-arm64.zip`. A DMG with the same base name and the app at its root also works. The updater selects the matching architecture and verifies the SHA-256 digest supplied by GitHub. The local build is ad hoc signed.
+To publish an update, bump the version and build number in `Resources/Info.plist`. Create a stable GitHub release with a matching numeric tag such as `v1.7` and attach the build as `Sayso-1.7-macOS-arm64.zip`. A DMG with the same base name and the app at its root also works. The updater selects the matching architecture and verifies the SHA-256 digest supplied by GitHub. The local build is ad hoc signed.
 
 The runtime is [whisper.cpp v1.8.4](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.8.4). Weights come from [Nava GGML](https://huggingface.co/Nimruz/Nava-ggml) and the [multilingual Whisper collection](https://huggingface.co/ggerganov/whisper.cpp).

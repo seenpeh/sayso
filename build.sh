@@ -48,7 +48,7 @@ plutil -lint "$bundle/Contents/Info.plist"
     -isystem "$sdk/usr/include" -L"$sdk/usr/lib" \
     -Wall -Wextra -Wno-unused-parameter -F"$build_dir" -framework whisper \
     -framework Foundation -framework AppKit -framework AVFoundation -framework Carbon \
-    -framework ApplicationServices -framework CoreGraphics -framework Metal -framework AudioToolbox -framework ServiceManagement -lobjc \
+    -framework ApplicationServices -framework QuartzCore -framework CoreGraphics -framework Metal -framework AudioToolbox -framework ServiceManagement -lobjc \
     -Wl,-rpath,@executable_path/../Frameworks \
     "$project_dir/Sources/"*.m \
     -o "$bundle/Contents/MacOS/VoiceKey"

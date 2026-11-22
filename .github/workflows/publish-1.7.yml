@@ -1,0 +1,20 @@
+name: Publish Sayso 1.7
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-1.7.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(uname -m)" = arm64
+          bash build.sh "$PWD/Sayso-1.7-macOS-arm64.zip"
+          gh release create v1.7 Sayso-1.7-macOS-arm64.zip --target "$GITHUB_SHA" --title "Sayso 1.7" --notes "Redesigns the menu bar popover and Settings. Adds a compact, voice-reactive recording capsule with quick transitions and Reduce Motion support."
