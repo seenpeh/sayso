@@ -8,6 +8,27 @@ static const CFTimeInterval morphDuration = .39;
 
 typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending };
 
+// Bend the row as one chain. Every adjoining pair turns through the same angle.
+static void curlPositions(CGPoint points[barCount], CGPoint center, CGFloat progress) {
+    CGFloat turn = 2 * M_PI / barCount;
+    CGFloat spacing = indicatorScale * (4.5 + progress * (2 * 8.4 * sin(turn / 2) - 4.5));
+    points[0] = CGPointZero;
+    CGFloat left = 0, right = 0, bottom = 0, top = 0;
+    for (NSUInteger i = 1; i < barCount; i++) {
+        CGFloat tangent = -(i - .5) * turn * progress;
+        points[i] = CGPointMake(points[i - 1].x + spacing * cos(tangent),
+                                points[i - 1].y + spacing * sin(tangent));
+        left = MIN(left, points[i].x);
+        right = MAX(right, points[i].x);
+        bottom = MIN(bottom, points[i].y);
+        top = MAX(top, points[i].y);
+    }
+    for (NSUInteger i = 0; i < barCount; i++) {
+        points[i].x += center.x - (left + right) / 2;
+        points[i].y += center.y - (bottom + top) / 2;
+    }
+}
+
 @interface LevelView : NSView {
     CALayer *_rotor;
     CALayer *_bars[barCount];
@@ -65,6 +86,20 @@ typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending }
     [CATransaction setDisableActions:!morph];
     [CATransaction setAnimationDuration:morphDuration];
     [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
+    NSMutableArray<NSValue *> *paths[barCount];
+    CGPoint positions[barCount];
+    if (_mode == WavePending) {
+        if (morph) {
+            for (NSUInteger i = 0; i < barCount; i++) paths[i] = [NSMutableArray array];
+            for (NSUInteger frame = 0; frame <= 30; frame++) {
+                curlPositions(positions, center, frame / 30.0);
+                for (NSUInteger i = 0; i < barCount; i++)
+                    [paths[i] addObject:[NSValue valueWithPoint:positions[i]]];
+            }
+        } else {
+            curlPositions(positions, center, 1);
+        }
+    }
     for (NSUInteger i = 0; i < barCount; i++) {
         CALayer *bar = _bars[i];
         if (!morph) [bar removeAllAnimations];
@@ -75,16 +110,25 @@ typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending }
             bar.transform = CATransform3DIdentity;
             bar.opacity = 1;
         } else {
-            // Neighbors split above and below the row, keeping the pairs in left-to-right order.
-            NSUInteger column = i / 2;
-            CGFloat angle = (column + .5) * (2 * M_PI / barCount);
-            CGFloat side = i % 2 == 0 ? 1 : -1;
-            CGFloat radius = 8.4 * indicatorScale;
-            bar.position = CGPointMake(center.x - radius * cos(angle), center.y + side * radius * sin(angle));
+            CGFloat rotation = -(CGFloat)i * (2 * M_PI / barCount);
+            bar.position = positions[i];
             bar.bounds = CGRectMake(0, 0, barWidth, 5.6 * indicatorScale);
-            bar.transform = CATransform3DMakeRotation(side * (M_PI_2 - angle), 0, 0, 1);
-            NSUInteger spoke = i % 2 == 0 ? column : barCount - 1 - column;
-            bar.opacity = .34 + .66 * spoke / (barCount - 1);
+            bar.transform = CATransform3DMakeRotation(rotation, 0, 0, 1);
+            bar.opacity = 1 - .66 * i / (barCount - 1);
+            if (morph) {
+                CAKeyframeAnimation *curl = [CAKeyframeAnimation animationWithKeyPath:@"position"];
+                curl.values = paths[i];
+                curl.duration = morphDuration;
+                curl.timingFunction = CATransaction.animationTimingFunction;
+                [bar addAnimation:curl forKey:@"position"];
+                CABasicAnimation *tilt = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+                tilt.fromValue = @0;
+                tilt.toValue = @(rotation);
+                tilt.duration = morphDuration;
+                tilt.timingFunction = curl.timingFunction;
+                [bar removeAnimationForKey:@"transform"];
+                [bar addAnimation:tilt forKey:@"transform"];
+            }
         }
     }
     [CATransaction commit];
@@ -154,7 +198,7 @@ typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending }
     _surface.layer.borderWidth = .75;
     _surface.layer.borderColor = [NSColor colorWithWhite:1 alpha:.26].CGColor;
     [_panel.contentView addSubview:_surface];
-    _wave = [[LevelView alloc] initWithFrame:NSMakeRect(0, 0, 36 * indicatorScale, 26 * indicatorScale)];
+    _wave = [[LevelView alloc] initWithFrame:NSMakeRect(0, 0, 36 * indicatorScale, 38 * indicatorScale)];
     [_wave setAccessibilityElement:NO];
     _symbol = [NSImageView new];
     _symbol.contentTintColor = [NSColor colorWithSRGBRed:.83 green:.79 blue:1 alpha:1];
@@ -203,6 +247,7 @@ typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending }
     self.wave.mode = mode;
     self.symbol.hidden = usesBars;
     BOOL hasLabel = text.length > 0;
+    [self.wave.layer removeAnimationForKey:@"centerGlyph"];
     CGFloat oldWidth = NSWidth(self.surface.bounds);
     self.label.stringValue = text;
     self.label.hidden = !hasLabel;
@@ -211,7 +256,7 @@ typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending }
     NSSize labelSize = [self.label.cell cellSizeForBounds:NSMakeRect(0, 0, 300, CGFLOAT_MAX)];
     CGFloat height = MAX(38 * scale, ceil(labelSize.height) + 18);
     CGFloat width = ceil(labelSize.width) + start + 17 * scale;
-    if (usesBars) width = MAX(156 * scale, width);
+    if (!hasLabel) width = mode == WaveListening ? NSWidth(self.wave.frame) + 20 * scale : height;
     NSScreen *screen = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
     if (!screen) return;
     NSRect area = screen.visibleFrame;
@@ -236,8 +281,17 @@ typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending }
         center.toValue = @(layer.position.x);
         CAAnimationGroup *morph = [CAAnimationGroup animation];
         morph.animations = @[resize, center];
-        morph.duration = .16;
-        morph.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        morph.duration = finishing ? morphDuration : .16;
+        morph.timingFunction = [CAMediaTimingFunction functionWithName:finishing ? kCAMediaTimingFunctionEaseInEaseOut : kCAMediaTimingFunctionEaseOut];
+        if (!hasLabel) {
+            CABasicAnimation *align = [CABasicAnimation animationWithKeyPath:@"position.x"];
+            align.additive = YES;
+            align.fromValue = @((oldWidth - width) / 2);
+            align.toValue = @0;
+            align.duration = morph.duration;
+            align.timingFunction = morph.timingFunction;
+            [self.wave.layer addAnimation:align forKey:@"centerGlyph"];
+        }
         [layer addAnimation:morph forKey:@"stateChange"];
     }
     if (appearing) {
