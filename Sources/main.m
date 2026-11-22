@@ -1689,4 +1689,5 @@ int main(int argc, const char *argv[]) {
         application.delegate = delegate;
         [application run];
     }
-    
+    return 0;
+}
