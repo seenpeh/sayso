@@ -34,7 +34,7 @@ Every shortcut needs Command, Control, Option, or Shift. Tap requires a combinat
 
 ## Updates
 
-If you use a previous 1.1–1.9 release, install 1.0.10 once from GitHub Releases. Those apps compare version numbers numerically and will skip 1.0.10.
+If you use a previous 1.1–1.9 release, install 1.0.11 once from GitHub Releases. Those apps compare version numbers numerically and will skip 1.0.11.
 
 Sayso checks the latest stable release on [GitHub](https://github.com/seenpeh/sayso/releases) at launch, when reopened and every 24 hours while running. You can also use **Settings → General → Check for Updates**. Select **Install … and restart** to download the release, verify its checksum and app signature, replace the current copy and reopen it. Install the app in a writable folder before updating.
 
@@ -43,9 +43,9 @@ Sayso checks the latest stable release on [GitHub](https://github.com/seenpeh/sa
 Install the Xcode Command Line Tools and run this on an Apple silicon Mac.
 
 ```sh
-./build.sh "$PWD/Sayso-1.0.10-macOS-arm64.zip"
+./build.sh "$PWD/Sayso-1.0.11-macOS-arm64.zip"
 ```
 
-To publish an update, bump the version and build number in `Resources/Info.plist`. Create a stable GitHub release with a matching numeric tag such as `v1.0.10` and attach the build as `Sayso-1.0.10-macOS-arm64.zip`. A DMG with the same base name and the app at its root also works. The updater selects the matching architecture and verifies the SHA-256 digest supplied by GitHub. The local build is ad hoc signed.
+To publish an update, bump the version and build number in `Resources/Info.plist`. Create a stable GitHub release with a matching numeric tag such as `v1.0.11` and attach the build as `Sayso-1.0.11-macOS-arm64.zip`. A DMG with the same base name and the app at its root also works. The updater selects the matching architecture and verifies the SHA-256 digest supplied by GitHub. The local build is ad hoc signed.
 
 The runtime is [whisper.cpp v1.8.4](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.8.4). Weights come from [Nava GGML](https://huggingface.co/Nimruz/Nava-ggml) and the [multilingual Whisper collection](https://huggingface.co/ggerganov/whisper.cpp).

@@ -1,0 +1,22 @@
+name: Publish Sayso 1.0.11
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-1.0.11.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, sign and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(uname -m)" = arm64
+          bash build.sh "$PWD/Sayso-1.0.11-macOS-arm64.zip"
+          gh release create v1.0.11 Sayso-1.0.11-macOS-arm64.zip --target "$GITHUB_SHA" --title "Sayso 1.0.11" --latest --notes "The eight bars now accelerate into the processing spinner during the final 150 ms of the curl, for a continuous transition. Users on 1.0.10 can update from Settings."
+          gh api repos/"$GITHUB_REPOSITORY"/releases/latest --jq '.tag_name' | grep -Fx v1.0.11
+          gh release view v1.0.11 --json assets --jq '.assets[].name' | grep -Fx Sayso-1.0.11-macOS-arm64.zip
