@@ -2,8 +2,9 @@
 #import <QuartzCore/QuartzCore.h>
 
 enum { barCount = 8 };
-static const CGFloat barWidth = 2.7;
-static const CFTimeInterval morphDuration = .26;
+static const CGFloat indicatorScale = 1.3;
+static const CGFloat barWidth = 2.7 * 1.3;
+static const CFTimeInterval morphDuration = .39;
 
 typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending };
 
@@ -41,7 +42,7 @@ typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending }
 
 - (CGFloat)heightAtIndex:(NSUInteger)i {
     static const CGFloat accents[barCount] = {8, 12, 16, 20, 18, 15, 12, 9};
-    return 4 + accents[i] * (_reduceMotion ? .65 : _levels[i]);
+    return (4 + accents[i] * (_reduceMotion ? .65 : _levels[i])) * indicatorScale;
 }
 
 - (void)addLevel:(CGFloat)level {
@@ -69,7 +70,7 @@ typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending }
         if (!morph) [bar removeAllAnimations];
         if (_mode == WaveHidden) continue;
         if (_mode == WaveListening) {
-            bar.position = CGPointMake(center.x + (i - (barCount - 1) * .5) * 4.5, center.y);
+            bar.position = CGPointMake(center.x + (i - (barCount - 1) * .5) * 4.5 * indicatorScale, center.y);
             bar.bounds = CGRectMake(0, 0, barWidth, [self heightAtIndex:i]);
             bar.transform = CATransform3DIdentity;
             bar.opacity = 1;
@@ -78,8 +79,9 @@ typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending }
             NSUInteger column = i / 2;
             CGFloat angle = (column + .5) * (2 * M_PI / barCount);
             CGFloat side = i % 2 == 0 ? 1 : -1;
-            bar.position = CGPointMake(center.x - 8.4 * cos(angle), center.y + side * 8.4 * sin(angle));
-            bar.bounds = CGRectMake(0, 0, barWidth, 5.6);
+            CGFloat radius = 8.4 * indicatorScale;
+            bar.position = CGPointMake(center.x - radius * cos(angle), center.y + side * radius * sin(angle));
+            bar.bounds = CGRectMake(0, 0, barWidth, 5.6 * indicatorScale);
             bar.transform = CATransform3DMakeRotation(side * (M_PI_2 - angle), 0, 0, 1);
             NSUInteger spoke = i % 2 == 0 ? column : barCount - 1 - column;
             bar.opacity = .34 + .66 * spoke / (barCount - 1);
@@ -152,7 +154,7 @@ typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending }
     _surface.layer.borderWidth = .75;
     _surface.layer.borderColor = [NSColor colorWithWhite:1 alpha:.26].CGColor;
     [_panel.contentView addSubview:_surface];
-    _wave = [[LevelView alloc] initWithFrame:NSMakeRect(0, 0, 36, 26)];
+    _wave = [[LevelView alloc] initWithFrame:NSMakeRect(0, 0, 36 * indicatorScale, 26 * indicatorScale)];
     [_wave setAccessibilityElement:NO];
     _symbol = [NSImageView new];
     _symbol.contentTintColor = [NSColor colorWithSRGBRed:.83 green:.79 blue:1 alpha:1];
@@ -200,14 +202,16 @@ typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending }
     self.earliestDismissal = finishing ? CACurrentMediaTime() + morphDuration + .23 : 0;
     self.wave.mode = mode;
     self.symbol.hidden = usesBars;
-    BOOL changing = !appearing && ![self.label.stringValue isEqualToString:text];
+    BOOL hasLabel = text.length > 0;
     CGFloat oldWidth = NSWidth(self.surface.bounds);
     self.label.stringValue = text;
-    CGFloat start = usesBars ? 59 : 40;
+    self.label.hidden = !hasLabel;
+    CGFloat scale = usesBars ? indicatorScale : 1;
+    CGFloat start = usesBars ? 59 * scale : 40;
     NSSize labelSize = [self.label.cell cellSizeForBounds:NSMakeRect(0, 0, 300, CGFLOAT_MAX)];
-    CGFloat height = MAX(38, ceil(labelSize.height) + 18);
-    CGFloat width = ceil(labelSize.width) + start + 17;
-    if (usesBars) width = MAX(156, width);
+    CGFloat height = MAX(38 * scale, ceil(labelSize.height) + 18);
+    CGFloat width = ceil(labelSize.width) + start + 17 * scale;
+    if (usesBars) width = MAX(156 * scale, width);
     NSScreen *screen = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
     if (!screen) return;
     NSRect area = screen.visibleFrame;
@@ -215,13 +219,14 @@ typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending }
     CGFloat panelWidth = MAX(390, width + 12);
     [self.panel setFrame:NSMakeRect(round(NSMidX(area) - panelWidth / 2), NSMinY(area) + 14, panelWidth, height + 12) display:NO];
     self.surface.frame = NSMakeRect(round((panelWidth - width) / 2), 6, width, height);
-    self.surface.layer.cornerRadius = 19;
+    self.surface.layer.cornerRadius = 19 * scale;
     self.label.frame = NSMakeRect(start, floor((height - labelSize.height) / 2), ceil(labelSize.width), ceil(labelSize.height));
-    [self.wave setFrameOrigin:NSMakePoint(15, floor((height - NSHeight(self.wave.frame)) / 2))];
+    CGFloat waveX = hasLabel ? 15 * scale : (width - NSWidth(self.wave.frame)) / 2;
+    [self.wave setFrameOrigin:NSMakePoint(waveX, (height - NSHeight(self.wave.frame)) / 2)];
     self.symbol.frame = NSMakeRect(15, floor((height - 17) / 2), 17, 17);
     [self.panel orderFrontRegardless];
     [self.panel invalidateShadow];
-    if (changing && motion && oldWidth != width) {
+    if (!appearing && motion && oldWidth != width) {
         CALayer *layer = self.surface.layer;
         CABasicAnimation *resize = [CABasicAnimation animationWithKeyPath:@"bounds.size.width"];
         resize.fromValue = @(oldWidth);
@@ -242,8 +247,9 @@ typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending }
     }
 }
 - (void)showListening {
-    [self show:@"Listening" waveMode:WaveListening];
+    [self show:@"" waveMode:WaveListening];
 }
+- (void)showProcessing { [self show:@"" waveMode:WavePending]; }
 - (void)showPending:(NSString *)message { [self show:message waveMode:WavePending]; }
 - (void)showNotice:(NSString *)message {
     [self show:message waveMode:WaveHidden];

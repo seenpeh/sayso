@@ -1,0 +1,20 @@
+name: Publish Sayso 1.9
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-1.9.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, sign and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(uname -m)" = arm64
+          bash build.sh "$PWD/Sayso-1.9-macOS-arm64.zip"
+          gh release create v1.9 Sayso-1.9-macOS-arm64.zip --target "$GITHUB_SHA" --title "Sayso 1.9" --notes "The floating indicator is 30% larger, shows the waveform and spinner without text, and gives the waveform-to-ring transition 50% more time."
