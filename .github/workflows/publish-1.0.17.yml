@@ -11,12 +11,15 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build, sign and publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           test "$(uname -m)" = arm64
           bash build.sh "$PWD/Sayso-1.0.17-macOS-arm64.zip"
-          gh release create v1.0.17 Sayso-1.0.17-macOS-arm64.zip --target "$GITHUB_SHA" --title "Sayso 1.0.17" --latest --notes "Shows the live waveform when recording starts. The gray background morphs into a circle, and the spinner bars keep their length through the transition."
+          git push origin 4dbbdb043f500fde66375e2db53699ae538e9faf:refs/tags/v1.0.17
+          gh release create v1.0.17 Sayso-1.0.17-macOS-arm64.zip --verify-tag --title "Sayso 1.0.17" --latest --notes "Shows the live waveform when recording starts. The gray background morphs into a circle, and the spinner bars keep their length through the transition."
           gh api repos/"$GITHUB_REPOSITORY"/releases/latest --jq '.tag_name' | grep -Fx v1.0.17
           gh release view v1.0.17 --json assets --jq '.assets[].name' | grep -Fx Sayso-1.0.17-macOS-arm64.zip
