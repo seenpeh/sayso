@@ -1,0 +1,22 @@
+name: Publish Sayso 1.0.17
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-1.0.17.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, sign and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(uname -m)" = arm64
+          bash build.sh "$PWD/Sayso-1.0.17-macOS-arm64.zip"
+          gh release create v1.0.17 Sayso-1.0.17-macOS-arm64.zip --target "$GITHUB_SHA" --title "Sayso 1.0.17" --latest --notes "Shows the live waveform when recording starts. The gray background morphs into a circle, and the spinner bars keep their length through the transition."
+          gh api repos/"$GITHUB_REPOSITORY"/releases/latest --jq '.tag_name' | grep -Fx v1.0.17
+          gh release view v1.0.17 --json assets --jq '.assets[].name' | grep -Fx Sayso-1.0.17-macOS-arm64.zip
