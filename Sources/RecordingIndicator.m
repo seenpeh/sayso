@@ -26,9 +26,15 @@ static void prepareTrail(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         const CGPoint points[] = {{0, 0},
-            {4.37965425532, -6.59142287234}, {9.54288563830, -9.47473404255}, {14.06382978723, -7.52293882979},
-            {25.18118351064, -4.74833776596}, {23.87267287234, 11.63597074468}, {12.73038563830, 12.71609042553},
-            {2.78590425532, 13.57878989362}, {4.79554521277, 9.20744680851}, {-7, 12.8}};
+            {4.37965425532, -6.59142287234},
+            {9.5428856383, -9.47473404255},
+            {14.0638297872, -7.52293882979},
+            {25.1811835106, -4.74833776596},
+            {23.8726728723, 11.6359707447},
+            {12.7303856383, 12.7160904255},
+            {2.78590425532, 13.5787898936},
+            {4.79554521277, 9.20744680851},
+            {-7, 12.8}};
         for (int i = 1; i < sampleCount; i++) {
             const CGPoint *p = points + 3 * ((i-1) / stepsPerBend);
             CGFloat t = (1 + (i-1) % stepsPerBend) / (CGFloat)stepsPerBend, u = 1-t;
@@ -141,6 +147,7 @@ static TrailSample sampleTrail(CGFloat distance) {
             CGFloat head=closed*smoothStep(t)+(2*M_PI*12.8/revolutionDuration)*morphDuration*t*t*(t-1);
             CGFloat gap=rowGap+(ringGap-rowGap)*smoothStep(head/closed);
             TrailSample poses[barCount];
+            // Align the centered row with the fixed orbit before the first spoke arrives.
             CGFloat rowOffset = (barCount-1)*rowGap/2;
             CGFloat offset = rowOffset + (7-rowOffset)*smoothStep(head/(entry*.52));
             for (int i=0; i<barCount; i++)
@@ -150,13 +157,7 @@ static TrailSample sampleTrail(CGFloat distance) {
                 CGPoint pos=CGPointMake(center.x+(p.x+offset)*routeScale, center.y-p.y*routeScale);
                 CGFloat angle=previousAngles[i]+remainder(-p.angle-previousAngles[i],2*M_PI);
                 previousAngles[i]=angle;
-                CGFloat height=initialHeights[i]+(7.2*routeScale-initialHeights[i])*smoothStep((head-(barCount-1-i)*gap)/entry);
-                for (int j=0; j<barCount; j++) {
-                    CGFloat dx=poses[j].x-p.x,dy=poses[j].y-p.y,d=hypot(dx,dy);
-                    if (d<.001) continue;
-                    CGFloat projection=fabs((-dx*sin(p.angle)+dy*cos(p.angle))/d);
-                    if (projection>.001) height=MIN(height,barWidth+MAX(0,d*routeScale-barWidth-1.5*routeScale)/projection);
-                }
+                CGFloat height = i < trailingCount ? initialHeights[i] : 7.2 * routeScale;
                 CGFloat size = 1;
                 if (i < trailingCount) {
                     CGFloat delay = .08 + .045*i;
@@ -310,7 +311,7 @@ static TrailSample sampleTrail(CGFloat distance) {
     CGFloat height = MAX(38 * scale, ceil(labelSize.height) + 18);
     CGFloat width = ceil(labelSize.width) + start + 17 * scale;
     if (usesBars && !hasLabel) {
-        width = waveformCapsuleWidth;
+        width = mode == WavePending ? waveformCapsuleHeight : waveformCapsuleWidth;
         height = waveformCapsuleHeight;
     } else if (!hasLabel) {
         width = height;

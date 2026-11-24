@@ -1043,7 +1043,6 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     if (self.indicatorPhase != self.phase) {
         if (self.phase == Recording) [self.indicator showListening];
         else if (self.phase == Transcribing) [self.indicator showProcessing];
-        else if (self.phase == RequestingMicrophone) [self.indicator showPending:@"Preparing microphone…"];
         else [self.indicator hide];
         self.indicatorPhase = self.phase;
     }
