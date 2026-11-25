@@ -11,7 +11,7 @@ Sayso is a macOS menu bar app that types local Whisper dictation directly into t
 3. Click where you want to type and press **Option–Shift–Space**. On first use, allow **Accessibility** for keyboard entry and **Microphone** for recording. Return to the text field and press the shortcut again if prompted.
 4. Speak naturally. A brief pause sends each phrase for recognition. During continuous speech, Sayso also processes short sections. Press the shortcut again, or click the recording icon in the menu bar, to finish the last phrase. Keep the destination field focused until typing finishes.
 
-Eight bars in the floating indicator rise and fall with your voice. When you stop recording, the same bars form a spinning ring while Sayso finishes typing, then the indicator disappears. Your text field keeps focus. If another app owns the shortcut, use **Start dictation** in the popover or choose a different shortcut in Settings. Secure fields and apps that ignore synthetic Unicode keyboard events may not accept dictation.
+Twelve bars in the floating indicator rise and fall with your voice. When you stop recording, the same bars rotate in place while Sayso finishes typing, then the indicator disappears. Your text field keeps focus. If another app owns the shortcut, use **Start dictation** in the popover or choose a different shortcut in Settings. Secure fields and apps that ignore synthetic Unicode keyboard events may not accept dictation.
 
 ## Models and settings
 
