@@ -5,7 +5,7 @@ Sayso is a macOS menu bar app that types local Whisper dictation directly into t
 ## Start dictating
 
 1. Quit the previous VoiceKey version if it’s running. Unzip **Sayso.app**, move it to **Applications**, and open it. This build supports Apple silicon on macOS 14 or later.
-2. Click the waveform in the menu bar, choose **Nava · فارسی** for Persian or **Whisper Large v3 Turbo** for multilingual dictation, and click **Download**.
+2. Click the typewriter in the menu bar, choose **Nava · فارسی** for Persian or **Whisper Large v3 Turbo** for multilingual dictation, and click **Download**.
 3. Click where you want to type and press **Option–Shift–Space**. On first use, allow **Accessibility** for keyboard entry and **Microphone** for recording. Return to the text field and press the shortcut again if prompted.
 4. Speak naturally. A brief pause sends each phrase for recognition. During continuous speech, Sayso also processes short sections. Press the shortcut again, or click the recording icon in the menu bar, to finish the last phrase. Keep the destination field focused until typing finishes.
 

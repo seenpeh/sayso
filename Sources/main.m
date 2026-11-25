@@ -1083,7 +1083,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
         subtitle = @"Choose a local model below to set up dictation.";
         stateSymbol = @"waveform";
     }
-    NSString *menuSymbol = @"waveform";
+    NSString *menuSymbol = nil;
     NSColor *tint = NSColor.controlAccentColor;
 
     switch (self.phase) {
@@ -1133,7 +1133,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
 
     NSString *menuDescription = self.phase == Recording ? @"Sayso, listening. Click to stop dictation." :
                                 self.phase == Transcribing ? @"Sayso, transcribing" : @"Sayso";
-    self.statusItem.button.image = Symbol(menuSymbol, menuDescription, 14);
+    self.statusItem.button.image = menuSymbol ? Symbol(menuSymbol, menuDescription, 14) : [NSImage imageNamed:@"TypewriterTemplate"];
     self.statusItem.button.toolTip = menuDescription;
     [self.statusItem.button setAccessibilityLabel:menuDescription];
     self.statusItem.button.contentTintColor = self.phase == Recording ? tint : nil;
