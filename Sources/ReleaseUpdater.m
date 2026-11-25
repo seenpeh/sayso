@@ -1,6 +1,7 @@
 #import "ReleaseUpdater.h"
 #import "WhisperEngine.h"
 #import <AppKit/AppKit.h>
+#import <Security/Security.h>
 #include <stdio.h>
 #include <fcntl.h>
 
@@ -65,6 +66,36 @@ static NSDictionary *CompatibleAsset(NSArray *assets) {
     return nil;
 }
 
+static NSNumber *SigningFlags(SecStaticCodeRef code) {
+    CFDictionaryRef signingInfo = NULL;
+    OSStatus status = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &signingInfo);
+    NSDictionary *info = CFBridgingRelease(signingInfo);
+    return status == errSecSuccess ? info[(__bridge NSString *)kSecCodeInfoFlags] : nil;
+}
+
+static BOOL UpdatePreservesSigningIdentity(NSURL *current, NSURL *candidate) {
+    SecStaticCodeRef update = NULL;
+    if (SecStaticCodeCreateWithPath((__bridge CFURLRef)candidate, kSecCSDefaultFlags, &update) != errSecSuccess)
+        return NO;
+    NSNumber *updateFlags = SigningFlags(update);
+    SecStaticCodeRef installed = NULL;
+    BOOL matches = NO;
+    if (updateFlags && !(updateFlags.unsignedIntValue & kSecCodeSignatureAdhoc) &&
+        SecStaticCodeCreateWithPath((__bridge CFURLRef)current, kSecCSDefaultFlags, &installed) == errSecSuccess) {
+        NSNumber *installedFlags = SigningFlags(installed);
+        // Allow existing ad hoc builds to migrate to a certificate once.
+        matches = installedFlags && (installedFlags.unsignedIntValue & kSecCodeSignatureAdhoc);
+        SecRequirementRef requirement = NULL;
+        if (installedFlags && !matches &&
+            SecCodeCopyDesignatedRequirement(installed, kSecCSDefaultFlags, &requirement) == errSecSuccess)
+            matches = SecStaticCodeCheckValidity(update, kSecCSCheckAllArchitectures, requirement) == errSecSuccess;
+        if (requirement) CFRelease(requirement);
+        CFRelease(installed);
+    }
+    CFRelease(update);
+    return matches;
+}
+
 static BOOL InstallBundle(NSURL *archive, NSDictionary *asset, NSString *version, NSError **error) {
     NSFileManager *files = NSFileManager.defaultManager;
     NSURL *current = NSBundle.mainBundle.bundleURL;
@@ -109,6 +140,10 @@ static BOOL InstallBundle(NSURL *archive, NSDictionary *asset, NSString *version
             *error = VKError(@"The release version or system requirements do not match this Mac."); return NO;
         }
         if (!RunTool(@"/usr/bin/codesign", @[@"--verify", @"--deep", @"--strict", candidate.path], error)) return NO;
+        if (!UpdatePreservesSigningIdentity(current, candidate)) {
+            *error = VKError(@"This release needs a stable code signing certificate that matches Sayso’s installed certificate, if present. Your current copy is still installed.");
+            return NO;
+        }
         if (renameatx_np(AT_FDCWD, candidate.fileSystemRepresentation, AT_FDCWD, current.fileSystemRepresentation, RENAME_SWAP)) {
             *error = VKError(@"Sayso could not replace this copy. Move the app to a writable Applications folder, reopen it and retry.");
             return NO;
@@ -188,8 +223,8 @@ static BOOL InstallBundle(NSURL *archive, NSDictionary *asset, NSString *version
         NSError *error = networkError;
         if (!error && (!file || [(NSHTTPURLResponse *)response statusCode] != 200))
             error = VKError(@"The update download failed.");
-        if (!error && !VKVerifyModel(file, [asset[@"size"] unsignedLongLongValue],
-                                     [asset[@"digest"] substringFromIndex:7], &error))
+        if (!error && !VKVerifyArchive(file, [asset[@"size"] unsignedLongLongValue],
+                                     [asset[@"digest"] substringFromIndex:7]))
             error = VKError(@"The update did not match the GitHub release checksum.");
         if (!error) InstallBundle(file, asset, version, &error);
         dispatch_async(dispatch_get_main_queue(), ^{

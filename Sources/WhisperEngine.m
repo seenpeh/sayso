@@ -10,7 +10,7 @@ NSError *VKError(NSString *description) {
                           userInfo:@{NSLocalizedDescriptionKey: description}];
 }
 
-BOOL VKVerifyModel(NSURL *url, uint64_t expectedBytes, NSString *sha256, NSError **error) {
+static BOOL VerifyFile(NSURL *url, uint64_t expectedBytes, NSString *sha256, BOOL requireModel, NSError **error) {
     NSFileHandle *file = [NSFileHandle fileHandleForReadingFromURL:url error:error];
     if (!file) return NO;
 
@@ -18,6 +18,7 @@ BOOL VKVerifyModel(NSURL *url, uint64_t expectedBytes, NSString *sha256, NSError
     CC_SHA256_Init(&hash);
     uint64_t bytes = 0;
     BOOL readFailed = NO;
+    BOOL invalidModel = NO;
     for (;;) {
         @autoreleasepool {
             NSData *chunk = [file readDataUpToLength:1024 * 1024 error:NULL];
@@ -25,16 +26,19 @@ BOOL VKVerifyModel(NSURL *url, uint64_t expectedBytes, NSString *sha256, NSError
                 readFailed = chunk == nil;
                 break;
             }
-            if (bytes == 0 && (chunk.length < 4 || memcmp(chunk.bytes, "lmgg", 4) != 0)) {
-                [file closeFile];
-                if (error) *error = VKError(@"Choose a whisper.cpp GGML speech recognition model (.bin).");
-                return NO;
+            if (requireModel && bytes == 0 && (chunk.length < 4 || memcmp(chunk.bytes, "lmgg", 4) != 0)) {
+                invalidModel = YES;
+                break;
             }
             bytes += chunk.length;
             CC_SHA256_Update(&hash, chunk.bytes, (CC_LONG)chunk.length);
         }
     }
     [file closeFile];
+    if (invalidModel) {
+        if (error) *error = VKError(@"Choose a whisper.cpp GGML speech recognition model (.bin).");
+        return NO;
+    }
     if (readFailed) {
         if (error) *error = VKError(@"VoiceKey could not read the downloaded model file.");
         return NO;
@@ -48,6 +52,14 @@ BOOL VKVerifyModel(NSURL *url, uint64_t expectedBytes, NSString *sha256, NSError
 
     if (error) *error = VKError(@"The downloaded file did not match the model. Try downloading it again.");
     return NO;
+}
+
+BOOL VKVerifyModel(NSURL *url, uint64_t expectedBytes, NSString *sha256, NSError **error) {
+    return VerifyFile(url, expectedBytes, sha256, YES, error);
+}
+
+BOOL VKVerifyArchive(NSURL *url, uint64_t expectedBytes, NSString *sha256) {
+    return VerifyFile(url, expectedBytes, sha256, NO, NULL);
 }
 
 static AVAudioPCMBuffer *ReadAudio(NSURL *url, NSError **error) {

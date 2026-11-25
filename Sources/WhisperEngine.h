@@ -2,6 +2,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+BOOL VKVerifyArchive(NSURL *url, uint64_t expectedBytes, NSString *sha256);
 BOOL VKVerifyModel(NSURL *url, uint64_t expectedBytes, NSString *sha256, NSError **error);
 NSString * _Nullable VKTranscribe(NSURL *audioURL, NSURL *modelURL, NSError **error);
 NSError *VKError(NSString *description);
