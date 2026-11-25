@@ -8,65 +8,14 @@ static const CGFloat waveformCapsuleWidth = 60 * 1.3;
 static const CGFloat waveformCapsuleHeight = 40 * 1.3;
 static const CFTimeInterval morphDuration = 1.04;
 static const CFTimeInterval revolutionDuration = 1.8;
-static const CGFloat rowGap = 5.6;
-static const CGFloat routeScale = 4.5 * 1.3 / 7;
-
-static CAMediaTimingFunction *curlTiming(void) {
-    return [CAMediaTimingFunction functionWithControlPoints:1.0/3 :.25 :2.0/3 :1];
-}
+static const CGFloat barSpacing = 4.7;
+static const CGFloat ringRadius = 11;
+static const CGFloat spokeHeight = 7;
 
 typedef NS_ENUM(NSUInteger, WaveMode) { WaveHidden, WaveListening, WavePending };
 
-// Arc-length samples of the three cubics from the saved path editor.
-enum { stepsPerBend = 180, sampleCount = 3 * stepsPerBend + 1 };
-typedef struct { CGFloat x, y, angle, distance; } TrailSample;
-static TrailSample trail[sampleCount];
-
-static void prepareTrail(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        const CGPoint points[] = {{0, 0},
-            {4.37965425532, -6.59142287234},
-            {9.5428856383, -9.47473404255},
-            {14.0638297872, -7.52293882979},
-            {25.1811835106, -4.74833776596},
-            {23.8726728723, 11.6359707447},
-            {12.7303856383, 12.7160904255},
-            {2.78590425532, 13.5787898936},
-            {4.79554521277, 9.20744680851},
-            {-7, 12.8}};
-        for (int i = 1; i < sampleCount; i++) {
-            const CGPoint *p = points + 3 * ((i-1) / stepsPerBend);
-            CGFloat t = (1 + (i-1) % stepsPerBend) / (CGFloat)stepsPerBend, u = 1-t;
-            CGFloat x = u*u*u*p[0].x + 3*u*u*t*p[1].x + 3*u*t*t*p[2].x + t*t*t*p[3].x;
-            CGFloat y = u*u*u*p[0].y + 3*u*u*t*p[1].y + 3*u*t*t*p[2].y + t*t*t*p[3].y;
-            TrailSample prev = trail[i-1];
-            trail[i] = (TrailSample){x,y,atan2(y-prev.y,x-prev.x),prev.distance+hypot(x-prev.x,y-prev.y)};
-        }
-    });
-}
-static CGFloat smoothStep(CGFloat t) {
-    t = MIN(1,MAX(0,t));
-    return t*t*(3-2*t);
-}
-static TrailSample sampleTrail(CGFloat distance) {
-    CGFloat entry = trail[sampleCount-1].distance;
-    if (distance <= 0) return (TrailSample){distance,0,0,0};
-    if (distance >= entry) {
-        CGFloat a = M_PI_2 + (distance-entry)/12.8;
-        return (TrailSample){-7+12.8*cos(a),12.8*sin(a),a+M_PI_2,distance};
-    }
-    int lo=0, hi=sampleCount-1;
-    while (hi-lo>1) {
-        int mid=(lo+hi)/2;
-        if (trail[mid].distance<distance) lo=mid; else hi=mid;
-    }
-    TrailSample a=trail[lo], b=trail[hi];
-    CGFloat f=(distance-a.distance)/(b.distance-a.distance);
-    return (TrailSample){a.x+f*(b.x-a.x),a.y+f*(b.y-a.y),b.angle,distance};
-}
 @interface LevelView : NSView {
-    CALayer *_rotor;
+    CALayer *_pivots[barCount];
     CALayer *_bars[barCount];
     CGFloat _levels[barCount];
     BOOL _reduceMotion;
@@ -80,15 +29,18 @@ static TrailSample sampleTrail(CGFloat distance) {
     if (!(self = [super initWithFrame:frame])) return nil;
     self.wantsLayer = YES;
     self.hidden = YES;
-    _rotor = [CALayer layer];
-    _rotor.frame = self.bounds;
-    [self.layer addSublayer:_rotor];
     for (NSUInteger i = 0; i < barCount; i++) {
+        CALayer *pivot = [CALayer layer];
+        CATransform3D perspective = CATransform3DIdentity;
+        perspective.m34 = -1.0 / 90;
+        pivot.sublayerTransform = perspective;
+        _pivots[i] = pivot;
+        [self.layer addSublayer:pivot];
         CALayer *bar = [CALayer layer];
         bar.cornerRadius = barWidth / 2;
         bar.backgroundColor = [NSColor colorWithSRGBRed:.82 green:.80 blue:1 alpha:1].CGColor;
         _bars[i] = bar;
-        [_rotor addSublayer:bar];
+        [pivot addSublayer:bar];
     }
     NSWorkspace *workspace = NSWorkspace.sharedWorkspace;
     _reduceMotion = workspace.accessibilityDisplayShouldReduceMotion;
@@ -116,83 +68,69 @@ static TrailSample sampleTrail(CGFloat distance) {
 }
 
 - (void)applyModeAnimated:(BOOL)morph {
-    CGPoint center = CGPointMake(CGRectGetMidX(_rotor.bounds), CGRectGetMidY(_rotor.bounds));
-    prepareTrail();
-    CFTimeInterval start = [_rotor convertTime:CACurrentMediaTime() fromLayer:nil];
-    [_rotor removeAllAnimations];
+    CGPoint center = CGPointMake(NSMidX(self.bounds), NSMidY(self.bounds));
+    CFTimeInterval start = CACurrentMediaTime();
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    CGFloat ringGap = 2*M_PI*12.8/spokeCount;
-    CGFloat entry = trail[sampleCount-1].distance, closed = entry + (spokeCount-1)*ringGap;
-    const int frames = 90;
-    NSMutableArray *positions[barCount], *angles[barCount], *sizes[barCount];
-    CGFloat previousAngles[barCount] = {}, initialHeights[barCount];
-    for (int i=0; i<barCount; i++) {
+    for (NSUInteger i = 0; i < barCount; i++) {
+        CALayer *pivot = _pivots[i];
         CALayer *bar = _bars[i];
-        initialHeights[i] = (bar.presentationLayer ?: bar).bounds.size.height;
+        CGRect previousBounds = (bar.presentationLayer ?: bar).bounds;
+        [pivot removeAllAnimations];
         [bar removeAllAnimations];
-        if (_mode == WaveListening) {
-            bar.position = CGPointMake(center.x+(i-(barCount-1)*.5)*rowGap*routeScale,center.y);
-            bar.transform = CATransform3DIdentity;
-            bar.bounds = CGRectMake(0,0,barWidth,[self heightAtIndex:i]);
-            bar.opacity = 1;
-        }
+        CGFloat rowX = center.x + (i - (barCount - 1) * .5) * barSpacing;
+        pivot.position = CGPointMake(rowX, center.y);
+        bar.transform = CATransform3DIdentity;
+        bar.opacity = 1;
+        bar.bounds = CGRectMake(0, 0, barWidth, [self heightAtIndex:i]);
+        if (_mode != WavePending) continue;
+
+        BOOL spoke = i >= trailingCount;
+        CGFloat angle = spoke ? (i - trailingCount) * 2 * M_PI / spokeCount : 0;
+        CGPoint destination = CGPointMake(center.x + ringRadius * sin(angle),
+                                          center.y + ringRadius * cos(angle));
+        pivot.position = destination;
+        bar.opacity = spoke ? 1 : 0;
+        bar.bounds = CGRectMake(0, 0, barWidth, spokeHeight);
+        CATransform3D radial = CATransform3DMakeRotation(-angle, 0, 0, 1);
+        bar.transform = radial;
         if (morph) {
-            positions[i]=[NSMutableArray array]; angles[i]=[NSMutableArray array]; sizes[i]=[NSMutableArray array];
+            CAMediaTimingFunction *ease = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+            CABasicAnimation *move = [CABasicAnimation animationWithKeyPath:@"position"];
+            move.fromValue = [NSValue valueWithPoint:CGPointMake(rowX, center.y)];
+            move.toValue = [NSValue valueWithPoint:destination];
+            move.duration = morphDuration;
+            move.timingFunction = ease;
+            move.beginTime = [pivot convertTime:start fromLayer:nil];
+            [pivot addAnimation:move forKey:@"formRing"];
+
+            CABasicAnimation *size = [CABasicAnimation animationWithKeyPath:@"bounds"];
+            size.fromValue = [NSValue valueWithRect:previousBounds];
+            size.toValue = [NSValue valueWithRect:bar.bounds];
+            CABasicAnimation *orient = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+            orient.fromValue = @0;
+            orient.toValue = @(remainder(-angle, 2 * M_PI));
+            CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
+            fade.fromValue = @1;
+            fade.toValue = @(bar.opacity);
+            CAAnimationGroup *form = [CAAnimationGroup animation];
+            form.animations = @[size, orient, fade];
+            form.duration = morphDuration;
+            form.timingFunction = ease;
+            form.beginTime = [bar convertTime:start fromLayer:nil];
+            [bar addAnimation:form forKey:@"formSpoke"];
         }
-    }
-    if (_mode == WavePending) {
-        for (int frame=morph?0:frames; frame<=frames; frame++) {
-            CGFloat t=frame/(CGFloat)frames;
-            CGFloat head=closed*smoothStep(t)+(2*M_PI*12.8/revolutionDuration)*morphDuration*t*t*(t-1);
-            CGFloat gap=rowGap+(ringGap-rowGap)*smoothStep(head/closed);
-            TrailSample poses[barCount];
-            // Align the centered row with the fixed orbit before the first spoke arrives.
-            CGFloat rowOffset = (barCount-1)*rowGap/2;
-            CGFloat offset = rowOffset + (7-rowOffset)*smoothStep(head/(entry*.52));
-            for (int i=0; i<barCount; i++)
-                poses[i]=sampleTrail(head-(barCount-1-i)*gap);
-            for (int i=0; i<barCount; i++) {
-                TrailSample p=poses[i];
-                CGPoint pos=CGPointMake(center.x+(p.x+offset)*routeScale, center.y-p.y*routeScale);
-                CGFloat angle=previousAngles[i]+remainder(-p.angle-previousAngles[i],2*M_PI);
-                previousAngles[i]=angle;
-                CGFloat height = i < trailingCount ? initialHeights[i] : 7.2 * routeScale;
-                CGFloat size = 1;
-                if (i < trailingCount) {
-                    CGFloat delay = .08 + .045*i;
-                    size -= smoothStep((t-delay)/.42);
-                }
-                CGRect bounds=CGRectMake(0,0,barWidth*size,height*size);
-                if (morph) {
-                    [positions[i] addObject:[NSValue valueWithPoint:pos]];
-                    [angles[i] addObject:@(angle)];
-                    [sizes[i] addObject:[NSValue valueWithRect:bounds]];
-                }
-                if (frame!=frames) continue;
-                CALayer *bar=_bars[i];
-                bar.position=pos; bar.transform=CATransform3DMakeRotation(angle,0,0,1);
-                bar.bounds=bounds; bar.opacity=i < trailingCount ? 0 : 1-.55*(i-trailingCount)/(spokeCount-1);
-                if (morph) {
-                    NSDictionary *tracks=@{@"position":positions[i],@"transform.rotation.z":angles[i],@"bounds":sizes[i]};
-                    for (NSString *key in tracks) {
-                        CAKeyframeAnimation *animation=[CAKeyframeAnimation animationWithKeyPath:key];
-                        animation.values=tracks[key]; animation.duration=morphDuration;
-                        animation.beginTime=[bar convertTime:start fromLayer:_rotor];
-                        [bar addAnimation:animation forKey:key];
-                    }
-                    CABasicAnimation *fade=[CABasicAnimation animationWithKeyPath:@"opacity"];
-                    fade.fromValue=@1; fade.toValue=@(bar.opacity); fade.duration=morphDuration;
-                    [bar addAnimation:fade forKey:@"opacity"];
-                }
-            }
-        }
-        if (!_reduceMotion) {
-            CABasicAnimation *spin=[CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
-            spin.fromValue=@0; spin.toValue=@(-2*M_PI); spin.duration=revolutionDuration;
-            spin.repeatCount=HUGE_VALF; spin.beginTime=start+(morph?morphDuration:0);
-            spin.timingFunction=[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
-            [_rotor addAnimation:spin forKey:@"spin"];
+        if (spoke && !_reduceMotion) {
+            // Turn the radial bar in its parent's coordinates, around its fixed center.
+            CABasicAnimation *turn = [CABasicAnimation animationWithKeyPath:@"sublayerTransform.rotation.y"];
+            turn.fromValue = @0;
+            turn.toValue = @(2 * M_PI);
+            turn.duration = revolutionDuration;
+            turn.repeatCount = HUGE_VALF;
+            turn.beginTime = [pivot convertTime:start fromLayer:nil] + (morph ? morphDuration : 0)
+                             + (i - trailingCount) * .04;
+            turn.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+            [pivot addAnimation:turn forKey:@"doorTurn"];
         }
     }
     [CATransaction commit];
@@ -311,7 +249,7 @@ static TrailSample sampleTrail(CGFloat distance) {
     CGFloat height = MAX(38 * scale, ceil(labelSize.height) + 18);
     CGFloat width = ceil(labelSize.width) + start + 17 * scale;
     if (usesBars && !hasLabel) {
-        width = mode == WavePending ? waveformCapsuleHeight : waveformCapsuleWidth;
+        width = waveformCapsuleWidth;
         height = waveformCapsuleHeight;
     } else if (!hasLabel) {
         width = height;
@@ -341,7 +279,7 @@ static TrailSample sampleTrail(CGFloat distance) {
         CAAnimationGroup *morph = [CAAnimationGroup animation];
         morph.animations = @[resize, center];
         morph.duration = finishing ? morphDuration : .16;
-        morph.timingFunction = finishing ? curlTiming() : [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        morph.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
         if (!hasLabel) {
             CABasicAnimation *align = [CABasicAnimation animationWithKeyPath:@"position.x"];
             align.additive = YES;
