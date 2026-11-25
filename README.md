@@ -1,3 +1,5 @@
+<img src="Artwork/typewriter-macos-yellow-v2.svg" width="128" height="128" alt="Sayso’s yellow typewriter logo">
+
 # Sayso
 
 Sayso is a macOS menu bar app that types local Whisper dictation directly into the text field you’re using. Speech is processed on your Mac. The app keeps audio in memory and leaves your clipboard alone.
