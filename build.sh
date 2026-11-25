@@ -4,6 +4,16 @@ set -euo pipefail
 project_dir="$(cd "$(dirname "$0")" && pwd)"
 build_dir="$project_dir/.build"
 app_path="${1:-$project_dir/Sayso.app}"
+signing_identity="${SAYSO_SIGNING_IDENTITY:--}"
+if [[ "$app_path" == *.zip && "$signing_identity" == - ]]; then
+    printf '%s\n' 'Release archives require SAYSO_SIGNING_IDENTITY. Use the same code signing certificate for every release.' >&2
+    exit 1
+fi
+
+signing_options=(--force --sign "$signing_identity")
+if [[ -n "${SAYSO_SIGNING_KEYCHAIN:-}" ]]; then
+    signing_options+=(--keychain "$SAYSO_SIGNING_KEYCHAIN")
+fi
 framework="$build_dir/whisper.framework"
 version="v1.8.4"
 archive_sha="1c7a93bd20fe4e57e0af12051ddb34b7a434dfc9acc02c8313393150b6d1821f"
@@ -47,15 +57,15 @@ plutil -lint "$bundle/Contents/Info.plist"
     -iframework "$sdk/System/Library/Frameworks" -F"$sdk/System/Library/Frameworks" \
     -isystem "$sdk/usr/include" -L"$sdk/usr/lib" \
     -Wall -Wextra -Wno-unused-parameter -F"$build_dir" -framework whisper \
-    -framework Foundation -framework AppKit -framework AVFoundation -framework Carbon \
+    -framework Foundation -framework AppKit -framework AVFoundation -framework Carbon -framework Security \
     -framework ApplicationServices -framework QuartzCore -framework CoreGraphics -framework Metal -framework AudioToolbox -framework ServiceManagement -lobjc \
     -Wl,-rpath,@executable_path/../Frameworks \
     "$project_dir/Sources/"*.m \
     -o "$bundle/Contents/MacOS/VoiceKey"
 
 xattr -cr "$bundle"
-codesign --force --sign - "$bundle/Contents/Frameworks/whisper.framework"
-codesign --force --sign - "$bundle"
+codesign "${signing_options[@]}" "$bundle/Contents/Frameworks/whisper.framework"
+codesign "${signing_options[@]}" "$bundle"
 codesign --verify --deep --strict "$bundle"
 if [[ "$app_path" == *.zip ]]; then
     ditto -c -k --norsrc --noextattr --keepParent "$bundle" "$app_path"

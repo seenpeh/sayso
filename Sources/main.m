@@ -10,37 +10,34 @@
 #import "ReleaseUpdater.h"
 #import <ApplicationServices/ApplicationServices.h>
 
-typedef struct {
-    const char *title;
-    const char *size;
-    const char *filename;
-    uint64_t bytes;
-    const char *sha256;
-    const char *origin;
-} Model;
+enum { noModel = -1, whisperTurbo, nava, builtInCount };
+static NSMutableArray<NSDictionary *> *models;
+static NSString *const customModelsKey = @"customWhisperModels";
 
-enum { noModel = -1, whisperTurbo, nava };
-static const Model models[] = {
-    [whisperTurbo] = {"Whisper Large v3 Turbo", "574 MB", "ggml-large-v3-turbo-q5_0.bin", 574041195,
-     "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2", NULL},
-    [nava] = {"Nava · فارسی", "574 MB", "ggml-nava-q5_0.bin", 574041195,
-     "e788c333480c50fbde2e4c7c145a46f90fed6e055892c9d81582a6d11af84b0f",
-     "https://huggingface.co/Nimruz/Nava-ggml/resolve/b4cc11c89fe8ec82619c8b4f97d1ea60c40ae6aa"}
-};
-static const NSInteger modelCount = sizeof(models) / sizeof(models[0]);
+static NSDictionary *Model(NSString *title, NSString *filename, NSNumber *bytes, NSString *sha, NSString *url) {
+    return @{@"title": title, @"filename": filename, @"bytes": bytes, @"sha": sha, @"url": url};
+}
+
+static void LoadModels(NSUserDefaults *defaults) {
+    models = [NSMutableArray arrayWithArray:@[
+        Model(@"Whisper Large v3 Turbo", @"ggml-large-v3-turbo-q5_0.bin", @574041195,
+              @"394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+              @"https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin"),
+        Model(@"Nava · فارسی", @"ggml-nava-q5_0.bin", @574041195,
+              @"e788c333480c50fbde2e4c7c145a46f90fed6e055892c9d81582a6d11af84b0f",
+              @"https://huggingface.co/Nimruz/Nava-ggml/resolve/b4cc11c89fe8ec82619c8b4f97d1ea60c40ae6aa/ggml-nava-q5_0.bin")]];
+    [models addObjectsFromArray:[defaults arrayForKey:customModelsKey] ?: @[]];
+}
 static BOOL PersianOnly(NSInteger index) { return index == nava; }
 static NSString *const selectedModelKey = @"selectedModelFilename";
 static const int64_t dictationEventTag = 0x564b4559;
-static NSString *const defaultShortcut = @"⌥⇧Space";
-static NSString *const modelOrigin =
-    @"https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1";
-
+static NSString *const defaultShortcut = @"Right Shift";
 static NSInteger LoadSelectedModel(NSUserDefaults *defaults) {
     NSString *filename = [defaults stringForKey:selectedModelKey];
     if (filename) {
         if (filename.length == 0) return noModel;
-        for (NSInteger i = 0; i < modelCount; i++) {
-            if ([filename isEqualToString:@(models[i].filename)]) return i;
+        for (NSInteger i = 0; i < (NSInteger)models.count; i++) {
+            if ([filename isEqualToString:models[i][@"filename"]]) return i;
         }
         return whisperTurbo;
     }
@@ -54,12 +51,12 @@ static NSInteger LoadSelectedModel(NSUserDefaults *defaults) {
         if (previous == noModel) model = noModel;
         else model = (previous == previousPersianBase || previous == previousPersianBase + 1) ? nava : whisperTurbo;
     }
-    [defaults setObject:model == noModel ? @"" : @(models[model].filename) forKey:selectedModelKey];
+    [defaults setObject:model == noModel ? @"" : models[model][@"filename"] forKey:selectedModelKey];
     return model;
 }
 
 typedef NS_ENUM(NSUInteger, Phase) {
-    Idle, Downloading, CancelingDownload, Verifying, RequestingMicrophone, Recording, Transcribing
+    Idle, LookingUpModel, Downloading, CancelingDownload, Verifying, RequestingMicrophone, Recording, Transcribing
 };
 
 static NSStackView *Stack(NSUserInterfaceLayoutOrientation orientation, NSArray<NSView *> *views,
@@ -277,8 +274,8 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    [defaults registerDefaults:@{@"shortcutKey": @(kVK_Space), @"shortcutModifiers": @(optionKey | shiftKey),
-                                 @"shortcutTitle": defaultShortcut, @"language": @"auto", @"recordingSounds": @YES}];
+    [defaults registerDefaults:@{@"language": @"auto", @"recordingSounds": @YES}];
+    LoadModels(defaults);
     self.selectedModel = LoadSelectedModel(defaults);
     self.recognitionQueue = dispatch_queue_create("sayso.recognition", DISPATCH_QUEUE_SERIAL);
     self.pending = [NSMutableArray array];
@@ -395,11 +392,26 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     return button;
 }
 
+- (void)populatePicker:(NSPopUpButton *)picker {
+    [picker removeAllItems];
+    for (NSDictionary *model in models) {
+        [picker.menu addItemWithTitle:model[@"title"] action:nil keyEquivalent:@""];
+    }
+    [picker addItemWithTitle:@"No active model"];
+    [picker addItemWithTitle:@"Add Hugging Face model…"];
+}
+
+- (void)saveCustomModels {
+    NSArray *custom = [models subarrayWithRange:NSMakeRange(builtInCount, models.count - builtInCount)];
+    [NSUserDefaults.standardUserDefaults setObject:custom forKey:customModelsKey];
+    [self populatePicker:self.settingsPicker];
+    [self populatePicker:self.modelPicker];
+}
+
 - (NSPopUpButton *)newModelPicker {
     NSPopUpButton *picker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    for (NSInteger i = 0; i < modelCount; i++) [picker addItemWithTitle:@(models[i].title)];
-    [picker addItemWithTitle:@"No active model"];
-    [picker selectItemAtIndex:self.selectedModel == noModel ? modelCount : self.selectedModel];
+    [self populatePicker:picker];
+    [picker selectItemAtIndex:self.selectedModel == noModel ? (NSInteger)models.count : self.selectedModel];
     [picker setAccessibilityLabel:@"Speech recognition model"];
     picker.target = self;
     picker.action = @selector(selectModel:);
@@ -484,6 +496,14 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
 }
 
 - (void)loadShortcutSettings:(NSUserDefaults *)defaults {
+    if (![defaults objectForKey:@"shortcutKey"] && ![defaults objectForKey:@"recordingMode"]) {
+        self.shortcutKey = kVK_RightShift;
+        self.shortcutModifiers = shiftKey;
+        self.shortcutTitle = defaultShortcut;
+        self.gesture.kind = DoubleTapGesture;
+        self.gesture.mode = HoldRecording;
+        return;
+    }
     self.shortcutKey = (UInt32)[defaults integerForKey:@"shortcutKey"];
     self.shortcutModifiers = (UInt32)[defaults integerForKey:@"shortcutModifiers"];
     self.shortcutTitle = [defaults stringForKey:@"shortcutTitle"];
@@ -500,7 +520,7 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     if (ShortcutProblem(self.shortcutKey, self.shortcutModifiers, self.shortcutTitle, self.gesture.kind)) {
         self.shortcutKey = kVK_Space;
         self.shortcutModifiers = optionKey | shiftKey;
-        self.shortcutTitle = defaultShortcut;
+        self.shortcutTitle = @"⌥⇧Space";
     }
 }
 
@@ -861,7 +881,11 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
 }
 
 - (void)resetShortcut:(id)sender {
-    [self setShortcutKey:kVK_Space modifiers:optionKey | shiftKey title:defaultShortcut];
+    self.gesture.kind = DoubleTapGesture;
+    self.gesture.mode = HoldRecording;
+    [self.modePicker selectItemAtIndex:HoldRecording];
+    [self.gesturePicker selectItemAtIndex:DoubleTapGesture];
+    [self setShortcutKey:kVK_RightShift modifiers:shiftKey title:defaultShortcut];
 }
 
 - (void)setShortcutKey:(UInt32)key modifiers:(UInt32)mods title:(NSString *)title {
@@ -1029,14 +1053,14 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
 
 - (NSURL *)modelURL {
     if (self.selectedModel == noModel) return nil;
-    return [[self modelsFolder] URLByAppendingPathComponent:@(models[self.selectedModel].filename)];
+    return [[self modelsFolder] URLByAppendingPathComponent:models[self.selectedModel][@"filename"]];
 }
 
 - (BOOL)modelExists {
     if (self.selectedModel == noModel) return NO;
     NSNumber *size = nil;
     [[self modelURL] getResourceValue:&size forKey:NSURLFileSizeKey error:NULL];
-    return size.unsignedLongLongValue == models[self.selectedModel].bytes;
+    return size.unsignedLongLongValue == [models[self.selectedModel][@"bytes"] unsignedLongLongValue];
 }
 
 - (void)refresh {
@@ -1076,6 +1100,10 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
         case CancelingDownload:
             title = self.phase == Downloading ? @"Downloading model…" : @"Canceling download…";
             subtitle = self.notice ?: @"You can close this popover while the download runs.";
+            break;
+        case LookingUpModel:
+            title = @"Looking up model files…";
+            subtitle = @"Reading the Hugging Face repository.";
             break;
         case Verifying:
             title = @"Verifying model…";
@@ -1147,7 +1175,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
         self.detail.stringValue = self.updater.status;
         if (self.updater.installing) self.headline.stringValue = @"Updating Sayso…";
     }
-    NSInteger pickerIndex = hasSelection ? self.selectedModel : modelCount;
+    NSInteger pickerIndex = hasSelection ? self.selectedModel : (NSInteger)models.count;
     [self.modelPicker selectItemAtIndex:pickerIndex];
     [self.settingsPicker selectItemAtIndex:pickerIndex];
     self.downloadButton.hidden = !hasSelection || (installed && !downloading);
@@ -1158,13 +1186,13 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     self.downloadButton.image = Symbol(self.phase == Downloading ? @"pause.fill" : @"arrow.down.circle", nil, 13);
     self.uninstallButton.enabled = available;
     self.downloadButton.enabled = available || self.phase == Downloading;
-    if (downloading) self.modelLabel.stringValue = [NSString stringWithFormat:@"%.0f%% · %s",
-        100 * self.downloadedFraction, models[self.selectedModel].size];
+    if (downloading) self.modelLabel.stringValue = [NSString stringWithFormat:@"%.0f%% · %@",
+        100 * self.downloadedFraction, [NSByteCountFormatter stringFromByteCount:[models[self.selectedModel][@"bytes"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile]];
     else if (hasSelection) {
         NSString *description = PersianOnly(self.selectedModel) ? @"Persian dictation" :
-            @"Multilingual";
-        self.modelLabel.stringValue = [NSString stringWithFormat:@"%@ · %s%@", description,
-            models[self.selectedModel].size, installed ? @" · Installed" : @""];
+            self.selectedModel >= builtInCount ? @"Custom model" : @"Multilingual";
+        self.modelLabel.stringValue = [NSString stringWithFormat:@"%@ · %@%@", description,
+            [NSByteCountFormatter stringFromByteCount:[models[self.selectedModel][@"bytes"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile], installed ? @" · Installed" : @""];
     } else self.modelLabel.stringValue = @"";
     self.modelLabel.hidden = !hasSelection;
     self.progress.hidden = !downloading;
@@ -1174,7 +1202,9 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     self.settingsDownload.hidden = self.downloadButton.hidden;
     self.settingsDownload.enabled = !self.downloadButton.hidden && self.downloadButton.enabled;
     self.unloadButton.enabled = hasSelection && available;
-    self.removeButton.enabled = installed && available;
+    BOOL custom = self.selectedModel >= builtInCount;
+    self.removeButton.title = custom ? @"Remove model" : @"Move to Trash";
+    self.removeButton.enabled = (installed || custom) && available;
     self.settingsModelStatus.hidden = !hasSelection && !self.notice;
     self.settingsModelStatus.stringValue = self.notice && (self.failed || !installed)
         ? self.notice : self.modelLabel.stringValue;
@@ -1182,17 +1212,111 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     self.settingsProgress.doubleValue = self.downloadedFraction;
 }
 
+- (void)addCustomModel {
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = @"Add a Hugging Face model";
+    alert.informativeText = @"Paste a public repository or file link for a whisper.cpp GGML speech recognition model (.bin).";
+    NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 360, 24)];
+    field.placeholderString = @"https://huggingface.co/owner/model";
+    alert.accessoryView = field;
+    alert.window.initialFirstResponder = field;
+    [alert addButtonWithTitle:@"Continue"];
+    [alert addButtonWithTitle:@"Cancel"];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSString *link = [field.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSURL *url = [NSURL URLWithString:link];
+    NSArray<NSString *> *parts = url.path.pathComponents;
+    BOOL repository = parts.count == 3;
+    BOOL file = parts.count >= 6 && [@[@"blob", @"resolve"] containsObject:parts[3]];
+    BOOL tree = parts.count == 5 && [parts[3] isEqualToString:@"tree"];
+    if (![url.scheme.lowercaseString isEqualToString:@"https"] || ![url.host.lowercaseString isEqualToString:@"huggingface.co"] ||
+        !(repository || file || tree)) {
+        [self displayError:@"Paste a Hugging Face repository link or a link to a .bin model file."];
+        return;
+    }
+    NSString *repo = [NSString stringWithFormat:@"%@/%@", parts[1], parts[2]];
+    NSString *revision = repository ? @"main" : parts[4];
+    NSString *path = file ? [[parts subarrayWithRange:NSMakeRange(5, parts.count - 5)] componentsJoinedByString:@"/"] : nil;
+    NSURLComponents *api = [NSURLComponents componentsWithString:@"https://huggingface.co"];
+    api.path = [NSString stringWithFormat:@"/api/models/%@/revision/%@", repo, revision];
+    api.query = @"blobs=true";
+    self.phase = LookingUpModel;
+    self.notice = @"Looking up model files…";
+    [self refresh];
+    [[NSURLSession.sharedSession dataTaskWithURL:api.URL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSDictionary *info = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.phase = Idle;
+            self.notice = nil;
+            if (error || ((NSHTTPURLResponse *)response).statusCode != 200 || ![info isKindOfClass:NSDictionary.class]) {
+                [self displayError:error.localizedDescription ?: @"Could not read this public Hugging Face repository."];
+                return;
+            }
+            [self chooseModelFromRepository:repo info:info path:path];
+        });
+    }] resume];
+}
+
+- (void)chooseModelFromRepository:(NSString *)repo info:(NSDictionary *)info path:(NSString *)path {
+    NSMutableArray *choices = [NSMutableArray array];
+    NSPopUpButton *picker = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 360, 26) pullsDown:NO];
+    for (NSDictionary *entry in info[@"siblings"]) {
+        NSString *name = entry[@"rfilename"];
+        NSDictionary *lfs = entry[@"lfs"];
+        if (![name.pathExtension.lowercaseString isEqualToString:@"bin"] || (path && ![name isEqualToString:path]) ||
+            [lfs[@"size"] longLongValue] <= 0 || [lfs[@"sha256"] length] != 64) continue;
+        [choices addObject:entry];
+        [picker addItemWithTitle:name];
+    }
+    if (!choices.count || ![info[@"sha"] length]) {
+        [self displayError:@"No downloadable GGML .bin model was found at this link."];
+        return;
+    }
+    if (choices.count > 1) {
+        NSAlert *alert = [NSAlert new];
+        alert.messageText = @"Choose a whisper.cpp model file";
+        alert.informativeText = repo;
+        alert.accessoryView = picker;
+        [alert addButtonWithTitle:@"Download"];
+        [alert addButtonWithTitle:@"Cancel"];
+        if ([alert runModal] != NSAlertFirstButtonReturn) { [self refresh]; return; }
+    }
+    NSDictionary *entry = choices[picker.indexOfSelectedItem];
+    NSString *name = entry[@"rfilename"];
+    NSURLComponents *source = [NSURLComponents componentsWithString:@"https://huggingface.co"];
+    source.path = [NSString stringWithFormat:@"/%@/resolve/%@/%@", repo, info[@"sha"], name];
+    NSDictionary *lfs = entry[@"lfs"];
+    NSUInteger index = [models indexOfObjectPassingTest:^BOOL(NSDictionary *item, NSUInteger idx, BOOL *stop) {
+        return [item[@"sha"] isEqual:lfs[@"sha256"]];
+    }];
+    if (index == NSNotFound) {
+        NSString *title = [NSString stringWithFormat:@"%@ · %@", name.lastPathComponent, repo];
+        NSString *filename = [NSUUID.UUID.UUIDString stringByAppendingPathExtension:@"bin"];
+        [models addObject:Model(title, filename, lfs[@"size"], lfs[@"sha256"], source.URL.absoluteString)];
+        [self saveCustomModels];
+        index = models.count - 1;
+    }
+    [self activateModel:index];
+    [self downloadModel:nil];
+}
+
 - (void)selectModel:(NSPopUpButton *)sender {
     if (self.phase != Idle || self.updater.installing) return;
     NSInteger index = sender.indexOfSelectedItem;
-    if (index < 0 || index > modelCount) return;
-    [self activateModel:index == modelCount ? noModel : index];
+    if (index == (NSInteger)models.count + 1) {
+        [self refresh];
+        [self addCustomModel];
+        return;
+    }
+    if (index < 0 || index > (NSInteger)models.count) return;
+    [self activateModel:index == (NSInteger)models.count ? noModel : index];
 }
 
 - (void)activateModel:(NSInteger)index {
     self.recognizer = nil;
     self.selectedModel = index;
-    [NSUserDefaults.standardUserDefaults setObject:index == noModel ? @"" : @(models[index].filename)
+    [NSUserDefaults.standardUserDefaults setObject:index == noModel ? @"" : models[index][@"filename"]
                                             forKey:selectedModelKey];
     self.notice = nil;
     self.failed = NO;
@@ -1204,7 +1328,22 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
 }
 
 - (void)removeModel:(id)sender {
-    if (self.phase != Idle || ![self modelExists]) return;
+    if (self.phase != Idle || self.selectedModel == noModel) return;
+    if (self.selectedModel >= builtInCount) {
+        NSFileManager *files = NSFileManager.defaultManager;
+        for (NSURL *url in @[self.partialURL, self.modelURL]) {
+            NSError *error = nil;
+            if ([files fileExistsAtPath:url.path] && ![files trashItemAtURL:url resultingItemURL:NULL error:&error]) {
+                [self displayError:error.localizedDescription];
+                return;
+            }
+        }
+        [models removeObjectAtIndex:self.selectedModel];
+        [self saveCustomModels];
+        [self activateModel:noModel];
+        return;
+    }
+    if (![self modelExists]) return;
     NSError *error = nil;
     if (![NSFileManager.defaultManager trashItemAtURL:[self modelURL] resultingItemURL:NULL error:&error]) {
         [self displayError:error.localizedDescription ?: @"Could not move the model to Trash."];
@@ -1255,13 +1394,14 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
 - (void)requestRemainingBytes {
     self.retryTimer = nil;
     self.notice = nil;
-    Model model = models[self.selectedModel];
+    NSDictionary *model = models[self.selectedModel];
+    uint64_t bytes = [model[@"bytes"] unsignedLongLongValue];
     self.receivedBytes = [self partialSize];
-    if (self.receivedBytes >= model.bytes) {
+    if (self.receivedBytes >= bytes) {
         [self verifyDownload];
         return;
     }
-    NSString *address = [NSString stringWithFormat:@"%@/%s?download=true", model.origin ? @(model.origin) : modelOrigin, model.filename];
+    NSString *address = model[@"url"];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:address]];
     request.timeoutInterval = 45;
     [request setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
@@ -1270,7 +1410,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
             forHTTPHeaderField:@"Range"];
     }
     self.downloadTask = [self.session dataTaskWithRequest:request];
-    self.downloadedFraction = (double)self.receivedBytes / model.bytes;
+    self.downloadedFraction = (double)self.receivedBytes / bytes;
     [self.downloadTask resume];
     [self refresh];
 }
@@ -1293,7 +1433,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     if (task != self.downloadTask) { completion(NSURLSessionResponseCancel); return; }
     NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
     NSInteger status = http.statusCode;
-    uint64_t size = models[self.selectedModel].bytes;
+    uint64_t size = [models[self.selectedModel][@"bytes"] unsignedLongLongValue];
     if (status != 200 && status != 206) {
         completion(NSURLSessionResponseCancel);
         NSString *message = [NSString stringWithFormat:@"The model server returned HTTP %ld.", status];
@@ -1327,7 +1467,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveData:(NSData *)data {
     if (task != self.downloadTask) return;
-    uint64_t size = models[self.selectedModel].bytes;
+    uint64_t size = [models[self.selectedModel][@"bytes"] unsignedLongLongValue];
     NSError *error = nil;
     if (data.length > size - self.receivedBytes || ![self.partialFile writeData:data error:&error]) {
         [task cancel];
@@ -1361,7 +1501,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
     if (task != self.downloadTask) return;
-    if (error || self.receivedBytes != models[self.selectedModel].bytes) {
+    if (error || self.receivedBytes != [models[self.selectedModel][@"bytes"] unsignedLongLongValue]) {
         [self retryDownload:error.localizedDescription ?: @"The connection ended early."];
         return;
     }
@@ -1375,13 +1515,14 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     self.phase = Verifying;
     self.downloadedFraction = 1;
     [self refresh];
-    Model model = models[self.selectedModel];
+    NSDictionary *model = models[self.selectedModel];
+    uint64_t bytes = [model[@"bytes"] unsignedLongLongValue];
     NSURL *stage = self.partialURL;
     NSURL *destination = self.modelURL;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSError *error = nil;
         NSFileManager *files = NSFileManager.defaultManager;
-        if (VKVerifyModel(stage, model.bytes, @(model.sha256), &error)) {
+        if (VKVerifyModel(stage, bytes, model[@"sha"], &error)) {
             if (rename(stage.fileSystemRepresentation, destination.fileSystemRepresentation) != 0)
                 error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
         } else if ([error.domain isEqualToString:@"VoiceKey"]) {

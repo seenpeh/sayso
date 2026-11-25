@@ -25,6 +25,11 @@ BOOL VKVerifyModel(NSURL *url, uint64_t expectedBytes, NSString *sha256, NSError
                 readFailed = chunk == nil;
                 break;
             }
+            if (bytes == 0 && (chunk.length < 4 || memcmp(chunk.bytes, "lmgg", 4) != 0)) {
+                [file closeFile];
+                if (error) *error = VKError(@"Choose a whisper.cpp GGML speech recognition model (.bin).");
+                return NO;
+            }
             bytes += chunk.length;
             CC_SHA256_Update(&hash, chunk.bytes, (CC_LONG)chunk.length);
         }

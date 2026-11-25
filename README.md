@@ -22,6 +22,8 @@ In **Settings → Models → Spoken language**, choose **Persian · فارسی**
 
 Downloads can be paused and resumed and are verified by size and SHA-256. **Unload** frees the model while keeping the download. **Move to Trash** removes it. Existing models and preferences use the original VoiceKey bundle identifier and the folder `~/Library/Application Support/VoiceKey/Models/`.
 
+By default, double-tap **Right Shift** and hold the second press to dictate. Release it to stop. Existing shortcut preferences are preserved.
+
 In **Settings → Recording**, choose **Toggle** to perform the same gesture to start and stop, or **Hold** to stop when you release the shortcut.
 
 | Shortcut gesture | Toggle recording | Hold recording |
