@@ -124,6 +124,23 @@ static NSString *ShortcutProblem(UInt32 key, UInt32 mods, NSString *title, Gestu
     return nil;
 }
 
+@interface ModelLinkField : NSTextField
+- (void)pasteLink:(id)sender;
+@end
+
+@implementation ModelLinkField
+- (void)pasteLink:(id)sender {
+    NSPasteboard *board = NSPasteboard.generalPasteboard;
+    NSString *link = [board stringForType:NSPasteboardTypeURL];
+    if (!link.length) link = [board stringForType:NSPasteboardTypeString];
+    link = [link stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!link.length) { NSBeep(); return; }
+    self.stringValue = link;
+    [self.window makeFirstResponder:self];
+    [self.currentEditor setSelectedRange:NSMakeRange(link.length, 0)];
+}
+@end
+
 @interface ShortcutButton : NSButton
 @property (copy) void (^capture)(NSEvent *event);
 @property (strong) NSEvent *capturedKeyDown;
@@ -1273,9 +1290,17 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     NSAlert *alert = [NSAlert new];
     alert.messageText = @"Add a Hugging Face model";
     alert.informativeText = @"Paste a Hugging Face link to a whisper.cpp GGML model (.bin) or C1Tech/whisper_small_persian.";
-    NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 360, 24)];
+    ModelLinkField *field = [[ModelLinkField alloc] initWithFrame:NSZeroRect];
     field.placeholderString = @"https://huggingface.co/owner/model";
-    alert.accessoryView = field;
+    NSButton *paste = [NSButton buttonWithTitle:@"Paste Link" target:field action:@selector(pasteLink:)];
+    paste.keyEquivalent = @"v";
+    paste.keyEquivalentModifierMask = NSEventModifierFlagCommand;
+    NSStackView *row = Stack(NSUserInterfaceLayoutOrientationHorizontal, @[field, paste], 8);
+    row.frame = NSMakeRect(0, 0, 400, 30);
+    [field setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [field setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    alert.accessoryView = row;
+    [NSApp activate];
     alert.window.initialFirstResponder = field;
     [alert addButtonWithTitle:@"Continue"];
     [alert addButtonWithTitle:@"Cancel"];
