@@ -22,6 +22,8 @@ Twelve bars in the floating indicator rise and fall with your voice. When you st
 
 In **Settings → Models → Spoken language**, choose **Persian · فارسی** to skip language detection on multilingual models. Latency depends on the model, your Mac and how often you pause. Sayso reuses the loaded model and requests Metal acceleration when a GPU is available.
 
+In **Settings → Models → Add model…**, paste a Hugging Face GGML link or the [C1Tech Persian Whisper Small repository](https://huggingface.co/C1Tech/whisper_small_persian). For C1Tech, request access on Hugging Face first. After approval, paste a read token with access to the model into Sayso’s secure prompt. Sayso downloads the vocabulary and weights (about 967 MB), verifies the weights and converts them on your Mac. Allow about 1.5 GB of free space during import. The token stays in memory for the download.
+
 Downloads can be paused and resumed and are verified by size and SHA-256. **Unload** frees the model while keeping the download. **Move to Trash** removes it. Existing models and preferences use the original VoiceKey bundle identifier and the folder `~/Library/Application Support/VoiceKey/Models/`.
 
 In **Settings → Shortcut**, choose **Toggle** to perform the same gesture to start and stop, or **Hold** to stop when you release the shortcut.

@@ -3,6 +3,7 @@
 #import <Carbon/Carbon.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import "WhisperEngine.h"
+#import "WhisperSmallImport.h"
 #import "PhraseCapture.h"
 #import "RecordingIndicator.h"
 #import "SaysoStyle.h"
@@ -28,7 +29,10 @@ static void LoadModels(NSUserDefaults *defaults) {
               @"https://huggingface.co/Nimruz/Nava-ggml/resolve/b4cc11c89fe8ec82619c8b4f97d1ea60c40ae6aa/ggml-nava-q5_0.bin")]];
     [models addObjectsFromArray:[defaults arrayForKey:customModelsKey] ?: @[]];
 }
-static BOOL PersianOnly(NSInteger index) { return index == nava; }
+static NSString *const persianSmallRepo = @"C1Tech/whisper_small_persian";
+static BOOL PersianOnly(NSInteger index) {
+    return index == nava || (index >= builtInCount && [models[index][@"convertPersianSmall"] boolValue]);
+}
 static NSString *const selectedModelKey = @"selectedModelFilename";
 static const int64_t dictationEventTag = 0x564b4559;
 static NSString *const defaultShortcut = @"Right Shift";
@@ -236,6 +240,8 @@ static NSString *ShortcutProblem(UInt32 key, UInt32 mods, NSString *title, Gestu
 @property (strong) NSButton *downloadButton;
 @property (strong) NSURLSession *session;
 @property (strong) NSURLSessionDataTask *downloadTask;
+@property (copy) NSString *modelAccessToken;
+@property (strong) NSData *modelVocabulary;
 @property (strong) PhraseCapture *capture;
 @property (strong) VKRecognizer *recognizer;
 @property (strong) dispatch_queue_t recognitionQueue;
@@ -1065,7 +1071,9 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     if (self.selectedModel == noModel) return NO;
     NSNumber *size = nil;
     [[self modelURL] getResourceValue:&size forKey:NSURLFileSizeKey error:NULL];
-    return size.unsignedLongLongValue == [models[self.selectedModel][@"bytes"] unsignedLongLongValue];
+    NSDictionary *model = models[self.selectedModel];
+    NSNumber *expected = model[@"convertPersianSmall"] ? model[@"installedBytes"] : model[@"bytes"];
+    return expected && size && [size isEqualToNumber:expected];
 }
 
 - (NSString *)shortcutInstructions {
@@ -1140,7 +1148,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
             break;
         case Verifying:
             title = @"Verifying model…";
-            subtitle = @"Checking the downloaded model file.";
+            subtitle = [models[self.selectedModel][@"convertPersianSmall"] boolValue] ? @"Verifying and converting Whisper Small on this Mac." : @"Checking the downloaded model file.";
             break;
         case RequestingMicrophone:
             title = @"Waiting for microphone access";
@@ -1189,7 +1197,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     self.addModelButton.enabled = available;
     self.languagePicker.enabled = hasSelection && available && !PersianOnly(self.selectedModel);
     self.languageHint.stringValue = !hasSelection ? @"Choose a model to set its spoken language." :
-        PersianOnly(self.selectedModel) ? @"Nava is trained for Persian and always uses this language." :
+        PersianOnly(self.selectedModel) ? @"This model is trained for Persian and always uses this language." :
         @"Choose Persian to skip automatic language detection.";
     [self.languagePicker selectItemAtIndex:PersianOnly(self.selectedModel) ||
         [[NSUserDefaults.standardUserDefaults stringForKey:@"language"] isEqual:@"fa"] ? 1 : 0];
@@ -1264,7 +1272,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     if (self.phase != Idle || self.updater.installing) return;
     NSAlert *alert = [NSAlert new];
     alert.messageText = @"Add a Hugging Face model";
-    alert.informativeText = @"Paste a public repository or file link for a whisper.cpp GGML speech recognition model (.bin).";
+    alert.informativeText = @"Paste a Hugging Face link to a whisper.cpp GGML model (.bin) or C1Tech/whisper_small_persian.";
     NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 360, 24)];
     field.placeholderString = @"https://huggingface.co/owner/model";
     alert.accessoryView = field;
@@ -1313,7 +1321,8 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     for (NSDictionary *entry in info[@"siblings"]) {
         NSString *name = entry[@"rfilename"];
         NSDictionary *lfs = entry[@"lfs"];
-        if (![name.pathExtension.lowercaseString isEqualToString:@"bin"] || (path && ![name isEqualToString:path]) ||
+        BOOL persianWeights = [repo caseInsensitiveCompare:persianSmallRepo] == NSOrderedSame && [name isEqual:@"model.safetensors"];
+        if ((!persianWeights && ![name.pathExtension.lowercaseString isEqualToString:@"bin"]) || (path && ![name isEqualToString:path]) ||
             [lfs[@"size"] longLongValue] <= 0 || [lfs[@"sha256"] length] != 64) continue;
         [choices addObject:entry];
         [picker addItemWithTitle:name];
@@ -1342,7 +1351,12 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     if (index == NSNotFound) {
         NSString *title = [NSString stringWithFormat:@"%@ · %@", name.lastPathComponent, repo];
         NSString *filename = [NSUUID.UUID.UUIDString stringByAppendingPathExtension:@"bin"];
-        [models addObject:Model(title, filename, lfs[@"size"], lfs[@"sha256"], source.URL.absoluteString)];
+        BOOL convert = [name isEqual:@"model.safetensors"];
+        NSMutableDictionary *model = [Model(convert ? repo : title, filename, lfs[@"size"], lfs[@"sha256"], source.URL.absoluteString) mutableCopy];
+        if (convert) model[@"convertPersianSmall"] = @YES;
+        if ([info[@"gated"] isEqual:@"auto"] || [info[@"gated"] isEqual:@"manual"] || [info[@"gated"] isEqual:@YES])
+            model[@"gated"] = @YES;
+        [models addObject:model];
         [self saveCustomModels];
         index = models.count - 1;
     }
@@ -1434,6 +1448,58 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
         [self displayError:error.localizedDescription];
         return;
     }
+    NSDictionary *model = models[self.selectedModel];
+    if ([model[@"gated"] boolValue]) {
+        NSAlert *alert = [NSAlert new];
+        alert.messageText = @"Access this Hugging Face model";
+        alert.informativeText = @"Request access on the model page. After approval, enter a Hugging Face read token with permission to download this model.";
+        NSSecureTextField *field = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 360, 24)];
+        field.placeholderString = @"Hugging Face read token";
+        alert.accessoryView = field;
+        alert.window.initialFirstResponder = field;
+        [alert addButtonWithTitle:@"Download"];
+        [alert addButtonWithTitle:@"Open model page"];
+        [alert addButtonWithTitle:@"Cancel"];
+        NSModalResponse response = [alert runModal];
+        if (response == NSAlertSecondButtonReturn) {
+            NSURL *page = [NSURL URLWithString:model[@"url"]];
+            NSArray *parts = page.path.pathComponents;
+            [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:[NSString stringWithFormat:@"https://huggingface.co/%@/%@", parts[1], parts[2]]]];
+        }
+        if (response != NSAlertFirstButtonReturn) return;
+        self.modelAccessToken = [field.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (!self.modelAccessToken.length) { [self displayError:@"Enter your Hugging Face read token to download this model."]; return; }
+    }
+    if ([model[@"convertPersianSmall"] boolValue]) {
+        self.phase = LookingUpModel;
+        [self refresh];
+        NSURL *weights = [NSURL URLWithString:model[@"url"]];
+        NSURL *url = [[weights URLByDeletingLastPathComponent] URLByAppendingPathComponent:@"vocab.json"];
+        NSMutableURLRequest *request = [self modelRequest:url];
+        // A completion-handler task uses the same ephemeral session and redirect policy as the weights.
+        [[self.session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSInteger status = ((NSHTTPURLResponse *)response).statusCode;
+            if (status != 200 || !data.length || error) {
+                [self completeDownload:error ?: VKError(status == 401 || status == 403 ?
+                    @"Hugging Face denied access. Check model approval and read-token permissions." : @"Could not download the model vocabulary.")];
+                return;
+            }
+            self.modelVocabulary = data;
+            [self startWeightDownload];
+        }] resume];
+        return;
+    }
+    [self startWeightDownload];
+}
+
+- (NSMutableURLRequest *)modelRequest:(NSURL *)url {
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    if (self.modelAccessToken.length && [url.scheme isEqual:@"https"] && [url.host isEqual:@"huggingface.co"])
+        [request setValue:[@"Bearer " stringByAppendingString:self.modelAccessToken] forHTTPHeaderField:@"Authorization"];
+    return request;
+}
+
+- (void)startWeightDownload {
     self.phase = Downloading;
     self.failed = NO;
     self.retryCount = 0;
@@ -1451,7 +1517,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
         return;
     }
     NSString *address = model[@"url"];
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:address]];
+    NSMutableURLRequest *request = [self modelRequest:[NSURL URLWithString:address]];
     request.timeoutInterval = 45;
     [request setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
     if (self.receivedBytes) {
@@ -1467,11 +1533,13 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task
  willPerformHTTPRedirection:(NSHTTPURLResponse *)response newRequest:(NSURLRequest *)request
  completionHandler:(void (^)(NSURLRequest *))completion {
-    if (task != self.downloadTask || ![request.URL.scheme.lowercaseString isEqualToString:@"https"]) {
+    if (![request.URL.scheme.lowercaseString isEqualToString:@"https"]) {
         completion(nil);
         return;
     }
     NSMutableURLRequest *redirect = [request mutableCopy];
+    [redirect setValue:[request.URL.host isEqual:@"huggingface.co"] ?
+        [task.originalRequest valueForHTTPHeaderField:@"Authorization"] : nil forHTTPHeaderField:@"Authorization"];
     [redirect setValue:[task.originalRequest valueForHTTPHeaderField:@"Range"] forHTTPHeaderField:@"Range"];
     [redirect setValue:@"identity" forHTTPHeaderField:@"Accept-Encoding"];
     completion(redirect);
@@ -1486,6 +1554,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     if (status != 200 && status != 206) {
         completion(NSURLSessionResponseCancel);
         NSString *message = [NSString stringWithFormat:@"The model server returned HTTP %ld.", status];
+        if (status == 401 || status == 403) message = @"Hugging Face denied access. Check model approval and read-token permissions.";
         if (status == 408 || status == 429 || status >= 500) [self retryDownload:message];
         else [self completeDownload:VKError(message)];
         return;
@@ -1568,20 +1637,45 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     uint64_t bytes = [model[@"bytes"] unsignedLongLongValue];
     NSURL *stage = self.partialURL;
     NSURL *destination = self.modelURL;
+    NSData *vocabulary = self.modelVocabulary;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSError *error = nil;
         NSFileManager *files = NSFileManager.defaultManager;
-        if (VKVerifyModel(stage, bytes, model[@"sha"], &error)) {
+        NSNumber *installedBytes = nil;
+        if ([model[@"convertPersianSmall"] boolValue]) {
+            NSURL *converted = [destination URLByAppendingPathExtension:@"converting"];
+            NSURL *prefix = [NSBundle.mainBundle URLForResource:@"whisper-small-multilingual" withExtension:@"header"];
+            if (!VKVerifyArchive(stage, bytes, model[@"sha"])) {
+                error = VKError(@"Model checksum mismatch. Download the model again.");
+                [files removeItemAtURL:stage error:NULL];
+            } else if (VKConvertWhisperSmall(stage, vocabulary, prefix, converted, &error) &&
+                       [converted getResourceValue:&installedBytes forKey:NSURLFileSizeKey error:&error]) {
+                if (rename(converted.fileSystemRepresentation, destination.fileSystemRepresentation) != 0)
+                    error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+                else [files removeItemAtURL:stage error:NULL];
+            }
+            [files removeItemAtURL:converted error:NULL];
+        } else if (VKVerifyModel(stage, bytes, model[@"sha"], &error)) {
             if (rename(stage.fileSystemRepresentation, destination.fileSystemRepresentation) != 0)
                 error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
         } else if ([error.domain isEqualToString:@"VoiceKey"]) {
             [files removeItemAtURL:stage error:NULL];
         }
-        dispatch_async(dispatch_get_main_queue(), ^{ [self completeDownload:error]; });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!error && installedBytes) {
+                NSMutableDictionary *updated = [model mutableCopy];
+                updated[@"installedBytes"] = installedBytes;
+                models[self.selectedModel] = updated;
+                [self saveCustomModels];
+            }
+            [self completeDownload:error];
+        });
     });
 }
 
 - (void)completeDownload:(NSError *)error {
+    self.modelAccessToken = nil;
+    self.modelVocabulary = nil;
     self.downloadTask = nil;
     [self.partialFile closeFile];
     self.partialFile = nil;

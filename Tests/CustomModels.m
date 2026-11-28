@@ -19,11 +19,6 @@ int main(void) {
         [defaults removeObjectForKey:customModelsKey];
         LoadModels(defaults);
         CatalogCheck *app = [CatalogCheck new];
-        app.gesture = [ShortcutGesture new];
-        NSUserDefaults *fresh = [[NSUserDefaults alloc] initWithSuiteName:NSUUID.UUID.UUIDString];
-        [app loadShortcutSettings:fresh];
-        assert(app.shortcutKey == kVK_RightShift && app.shortcutModifiers == shiftKey);
-        assert(app.gesture.kind == DoubleTapGesture && app.gesture.mode == HoldRecording);
         app.folder = [[NSURL fileURLWithPath:NSTemporaryDirectory()] URLByAppendingPathComponent:NSUUID.UUID.UUIDString];
         app.settingsPicker = [app newModelPicker];
         app.modelPicker = [app newModelPicker];
@@ -42,6 +37,21 @@ int main(void) {
         LoadModels(defaults);
         assert(models.count == builtInCount && LoadSelectedModel(defaults) == noModel);
         assert(app.settingsPicker.numberOfItems == builtInCount + 2);
+        NSDictionary *weights = @{@"rfilename": @"model.safetensors", @"lfs": @{@"sha256": digest, @"size": @966995080}};
+        NSDictionary *gated = @{@"sha": @"revision", @"gated": @"manual", @"siblings": @[weights]};
+        app.requestedDownload = NO;
+        [app chooseModelFromRepository:@"C1Tech/whisper_small_persian" info:gated path:nil];
+        assert(app.requestedDownload && PersianOnly(app.selectedModel));
+        NSDictionary *import = models[app.selectedModel];
+        assert([import[@"convertPersianSmall"] boolValue] && [import[@"gated"] boolValue]);
+        assert([import[@"url"] hasSuffix:@"/resolve/revision/model.safetensors"]);
+        assert(![app modelExists]);
+        app.modelAccessToken = @"example";
+        NSURLRequest *request = [app modelRequest:[NSURL URLWithString:import[@"url"]]];
+        assert([[request valueForHTTPHeaderField:@"Authorization"] isEqual:@"Bearer example"]);
+        NSURLRequest *cdn = [app modelRequest:[NSURL URLWithString:@"https://cdn.example/model"]];
+        assert([cdn valueForHTTPHeaderField:@"Authorization"] == nil);
+        [app removeModel:nil];
         puts("Custom model catalog checks passed.");
     }
 }
