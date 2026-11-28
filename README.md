@@ -9,7 +9,7 @@ Sayso is a macOS menu bar app that types local Whisper dictation directly into t
 1. Unzip **Sayso.app**, move it to **Applications**, and open it. Sayso runs on Apple silicon with macOS 14 or later.
 2. Click the typewriter in the menu bar. Under **Speech model**, choose **Nava · فارسی** for Persian or **Whisper Large v3 Turbo** for multilingual dictation. Click **Download model**.
 3. Click in a text field. With the default shortcut, double-tap **Right Shift** and hold the second press while speaking. On first use, allow **Accessibility** for keyboard entry and **Microphone** for recording, then return to the text field.
-4. Pause briefly to type each phrase. Release **Right Shift** to finish and keep the text field focused until the floating indicator disappears. If you use a custom shortcut, **Settings → Recording** shows the gesture and how to stop.
+4. Pause briefly to type each phrase. Release **Right Shift** to finish and keep the text field focused until the floating indicator disappears. If you use a custom shortcut, **Settings → Shortcut** shows the gesture and how to stop.
 
 Twelve bars in the floating indicator rise and fall with your voice. When you stop recording, the bars curl along a shared path into an eight-spoke ring. Each spoke then turns in place around its own long axis while Sayso finishes typing, then the indicator disappears. Your text field keeps focus. If another app owns the shortcut, use **Start dictation** in the popover or choose a different shortcut in Settings. Secure fields and apps that ignore synthetic Unicode keyboard events may not accept dictation.
 
@@ -24,7 +24,7 @@ In **Settings → Models → Spoken language**, choose **Persian · فارسی**
 
 Downloads can be paused and resumed and are verified by size and SHA-256. **Unload** frees the model while keeping the download. **Move to Trash** removes it. Existing models and preferences use the original VoiceKey bundle identifier and the folder `~/Library/Application Support/VoiceKey/Models/`.
 
-In **Settings → Recording**, choose **Toggle** to perform the same gesture to start and stop, or **Hold** to stop when you release the shortcut.
+In **Settings → Shortcut**, choose **Toggle** to perform the same gesture to start and stop, or **Hold** to stop when you release the shortcut.
 
 | Shortcut gesture | Toggle recording | Hold recording |
 | --- | --- | --- |

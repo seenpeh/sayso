@@ -209,6 +209,9 @@ static NSString *ShortcutProblem(UInt32 key, UInt32 mods, NSString *title, Gestu
 @property (strong) NSButton *settingsDownload;
 @property (strong) NSButton *unloadButton;
 @property (strong) NSButton *removeButton;
+@property (strong) NSButton *addModelButton;
+@property (strong) NSTextField *languageHint;
+@property (strong) NSStackView *modelActions;
 @property (strong) NSTextField *settingsModelStatus;
 @property (strong) NSProgressIndicator *settingsProgress;
 @property (strong) NSPopUpButton *languagePicker;
@@ -639,7 +642,8 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     self.settingsDownload = [self button:@"Download" action:@selector(downloadModel:)];
     self.unloadButton = [self button:@"Unload" action:@selector(unloadModel:)];
     self.removeButton = [self button:@"Move to Trash" action:@selector(removeModel:)];
-    NSStackView *modelActions = Stack(NSUserInterfaceLayoutOrientationHorizontal,
+    self.addModelButton = [self button:@"Add model…" action:@selector(addCustomModel)];
+    self.modelActions = Stack(NSUserInterfaceLayoutOrientationHorizontal,
         @[self.settingsDownload, self.unloadButton, self.removeButton, FlexibleSpace()], 6);
     self.settingsModelStatus = Caption(@"");
     self.settingsProgress = [NSProgressIndicator new];
@@ -650,6 +654,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     self.languagePicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     [self.languagePicker addItemsWithTitles:@[@"Detect language", @"Persian · فارسی"]];
     [self.languagePicker setAccessibilityLabel:@"Spoken language"];
+    self.languageHint = Caption(@"");
     self.languagePicker.target = self;
     self.languagePicker.action = @selector(changeLanguage:);
 
@@ -669,18 +674,20 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
         @[self.checkButton, self.settingsUpdate, FlexibleSpace()], 6);
 
     NSArray *groups = @[
-        @[PreferenceGroup(@[PreferenceRow(@"Global shortcut", shortcut), self.shortcutMessage, Rule(),
-                            PreferenceRow(@"Shortcut gesture", self.gesturePicker), Rule(),
-                            PreferenceRow(@"Recording mode", self.modePicker), self.modeHint]),
-          PreferenceGroup(@[PreferenceRow(@"Recording sounds", sounds)])],
-        @[PreferenceGroup(@[PreferenceRow(@"Speech model", self.settingsPicker), self.settingsModelStatus,
-                            self.settingsProgress, modelActions]),
-          PreferenceGroup(@[PreferenceRow(@"Spoken language", self.languagePicker)])],
         @[PreferenceGroup(@[PreferenceRow(@"Start Sayso at login", self.loginButton), self.loginMessage,
                             Stack(NSUserInterfaceLayoutOrientationHorizontal, @[self.loginSettingsButton, FlexibleSpace()], 4)]),
           PreferenceGroup(@[PreferenceRow([@"Sayso " stringByAppendingString:version], releases),
                             self.updateStatus, updates]),
-          Stack(NSUserInterfaceLayoutOrientationHorizontal, @[FlexibleSpace(), self.uninstallButton], 0)]
+          Stack(NSUserInterfaceLayoutOrientationHorizontal, @[FlexibleSpace(), self.uninstallButton], 0)],
+        @[PreferenceGroup(@[PreferenceRow(@"Global shortcut", shortcut), self.shortcutMessage, Rule(),
+                            PreferenceRow(@"Shortcut gesture", self.gesturePicker), Rule(),
+                            PreferenceRow(@"Recording mode", self.modePicker), self.modeHint]),
+          PreferenceGroup(@[PreferenceRow(@"Recording sounds", sounds)])],
+        @[PreferenceGroup(@[PreferenceRow(@"Dictation model", self.settingsPicker), self.settingsModelStatus,
+                            self.settingsProgress, self.modelActions]),
+          PreferenceGroup(@[PreferenceRow(@"Spoken language", self.languagePicker), self.languageHint]),
+          PreferenceGroup(@[PreferenceRow(@"Custom models", self.addModelButton),
+                            Caption(@"Add a whisper.cpp model from a Hugging Face link.")])]
     ];
 
     self.settingsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 730, 468)
@@ -710,7 +717,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
         @[SaysoMark(38), Label(@"Sayso", 21, NSFontWeightSemibold, NSColor.labelColor)], 9);
     [sidebar addSubview:brand];
     brand.translatesAutoresizingMaskIntoConstraints = NO;
-    NSArray *titles = @[@"Recording", @"Models", @"General"];
+    NSArray *titles = @[@"General", @"Shortcut", @"Models"];
     self.settingsNav = [NSTableView new];
     self.settingsNav.style = NSTableViewStyleSourceList;
     self.settingsNav.backgroundColor = NSColor.clearColor;
@@ -777,7 +784,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView { return 3; }
 
 - (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)column row:(NSInteger)row {
-    NSArray *icons = @[@"waveform", @"square.3.layers.3d", @"gearshape"];
+    NSArray *icons = @[@"gearshape", @"keyboard", @"square.3.layers.3d"];
     NSString *title = [self.settingsTabs tabViewItemAtIndex:row].label;
     NSTableCellView *cell = [NSTableCellView new];
     NSImageView *icon = [NSImageView imageViewWithImage:Symbol(icons[row], nil, 15)];
@@ -1179,7 +1186,11 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     self.recordButton.hidden = !installed || downloading;
     BOOL available = self.phase == Idle && !self.updater.installing;
     self.modelPicker.enabled = self.settingsPicker.enabled = available;
-    self.languagePicker.enabled = available && !PersianOnly(self.selectedModel);
+    self.addModelButton.enabled = available;
+    self.languagePicker.enabled = hasSelection && available && !PersianOnly(self.selectedModel);
+    self.languageHint.stringValue = !hasSelection ? @"Choose a model to set its spoken language." :
+        PersianOnly(self.selectedModel) ? @"Nava is trained for Persian and always uses this language." :
+        @"Choose Persian to skip automatic language detection.";
     [self.languagePicker selectItemAtIndex:PersianOnly(self.selectedModel) ||
         [[NSUserDefaults.standardUserDefaults stringForKey:@"language"] isEqual:@"fa"] ? 1 : 0];
     NSString *updateTitle = self.updater.availableVersion ?
@@ -1229,18 +1240,28 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     self.popover.contentSize = NSMakeSize(NSWidth(self.page.frame) + 32, ceil(self.page.fittingSize.height) + 30);
     self.settingsDownload.hidden = self.downloadButton.hidden;
     self.settingsDownload.enabled = !self.downloadButton.hidden && self.downloadButton.enabled;
-    self.unloadButton.enabled = hasSelection && available;
+    self.unloadButton.hidden = !installed || downloading;
+    self.unloadButton.enabled = available;
+    self.unloadButton.toolTip = @"Stop using this model and keep its downloaded file.";
     BOOL custom = self.selectedModel >= builtInCount;
     self.removeButton.title = custom ? @"Remove model" : @"Move to Trash";
-    self.removeButton.enabled = (installed || custom) && available;
-    self.settingsModelStatus.hidden = !hasSelection && !self.notice;
-    self.settingsModelStatus.stringValue = self.notice && (self.failed || !installed)
-        ? self.notice : self.modelLabel.stringValue;
+    self.removeButton.hidden = !(installed || custom) || downloading;
+    self.removeButton.enabled = available;
+    self.modelActions.hidden = !hasSelection;
+    NSString *modelStatus = hasSelection ? self.modelLabel.stringValue : @"Choose a model to start dictating.";
+    if (hasSelection && !installed && !downloading) {
+        modelStatus = [modelStatus stringByAppendingString:resumable ? @" · Partially downloaded" : @" · Download required"];
+    }
+    if (self.notice && (self.failed || !installed || self.phase == LookingUpModel)) {
+        modelStatus = [NSString stringWithFormat:@"%@\n%@", modelStatus, self.notice];
+    }
+    self.settingsModelStatus.stringValue = modelStatus;
     self.settingsProgress.hidden = !downloading;
     self.settingsProgress.doubleValue = self.downloadedFraction;
 }
 
 - (void)addCustomModel {
+    if (self.phase != Idle || self.updater.installing) return;
     NSAlert *alert = [NSAlert new];
     alert.messageText = @"Add a Hugging Face model";
     alert.informativeText = @"Paste a public repository or file link for a whisper.cpp GGML speech recognition model (.bin).";
