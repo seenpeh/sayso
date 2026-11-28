@@ -1959,6 +1959,21 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
 
 @end
 
+// The menu-bar app has no storyboard to install AppKit's standard editing shortcuts.
+static NSMenu *EditingMenuBar(void) {
+    NSMenu *bar = [NSMenu new];
+    NSMenuItem *appItem = [bar addItemWithTitle:@"Sayso" action:nil keyEquivalent:@""];
+    appItem.submenu = [[NSMenu alloc] initWithTitle:@"Sayso"];
+    NSMenuItem *editItem = [bar addItemWithTitle:@"Edit" action:nil keyEquivalent:@""];
+    NSMenu *edit = [[NSMenu alloc] initWithTitle:@"Edit"];
+    [edit addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
+    [edit addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+    [edit addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+    [edit addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+    editItem.submenu = edit;
+    return bar;
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc == 4 && strcmp(argv[1], "--transcribe-test") == 0) {
@@ -1975,6 +1990,7 @@ int main(int argc, const char *argv[]) {
         }
         NSApplication *application = NSApplication.sharedApplication;
         [application setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        application.mainMenu = EditingMenuBar();
         __attribute__((objc_precise_lifetime)) VoiceKey *delegate = [VoiceKey new];
         application.delegate = delegate;
         [application run];
