@@ -5,28 +5,20 @@ static NSColor *RGB(CGFloat r, CGFloat g, CGFloat b) {
     return [NSColor colorWithSRGBRed:r green:g blue:b alpha:1];
 }
 
-
 NSImageView *SaysoMark(CGFloat size) {
-    NSImage *mark = [NSImage imageWithSize:NSMakeSize(36, 36) flipped:NO drawingHandler:^BOOL(NSRect rect) {
-        NSBezierPath *tile = [NSBezierPath bezierPathWithRoundedRect:rect xRadius:10 yRadius:10];
-        NSGradient *enamel = [[NSGradient alloc] initWithStartingColor:RGB(.56,.49,.93) endingColor:RGB(.32,.26,.69)];
-        [enamel drawInBezierPath:tile angle:-75];
-        [[NSColor colorWithWhite:1 alpha:.35] setStroke];
-        [[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(rect, .7, .7) xRadius:9.5 yRadius:9.5] stroke];
-        CGFloat heights[] = {7, 15, 23, 13, 6};
-        [NSColor.whiteColor setFill];
-        for (NSInteger i = 0; i < 5; i++) {
-            NSRect bar = NSMakeRect(8.5 + 4 * i, (36 - heights[i]) / 2, 3, heights[i]);
-            [[NSBezierPath bezierPathWithRoundedRect:bar xRadius:1.5 yRadius:1.5] fill];
-        }
-        return YES;
-    }];
+    NSImage *mark = [NSBundle.mainBundle imageForResource:@"VoiceKey"] ?: [NSImage imageNamed:NSImageNameApplicationIcon];
     NSImageView *view = [NSImageView imageViewWithImage:mark];
     view.imageScaling = NSImageScaleProportionallyUpOrDown;
     [view.widthAnchor constraintEqualToConstant:size].active = YES;
     [view.heightAnchor constraintEqualToConstant:size].active = YES;
     [view setAccessibilityElement:NO];
     return view;
+}
+
+NSFont *SaysoHeadingFont(CGFloat size) {
+    NSFont *base = [NSFont systemFontOfSize:size weight:NSFontWeightSemibold];
+    NSFontDescriptor *serif = [base.fontDescriptor fontDescriptorWithDesign:NSFontDescriptorSystemDesignSerif];
+    return serif ? [NSFont fontWithDescriptor:serif size:size] : base;
 }
 
 void SaysoReveal(NSView *view, CGFloat offset) {
@@ -45,64 +37,32 @@ void SaysoReveal(NSView *view, CGFloat offset) {
     [view.layer addAnimation:entry forKey:@"pageEntry"];
 }
 
-@implementation VoiceCard {
-    NSArray<CAShapeLayer *> *_strands;
-}
-- (instancetype)initWithFrame:(NSRect)frame {
-    if (!(self = [super initWithFrame:frame])) return nil;
-    self.wantsLayer = YES;
-    self.layer.cornerRadius = 17;
-    self.layer.cornerCurve = kCACornerCurveContinuous;
-    self.layer.masksToBounds = YES;
-    NSMutableArray *strands = [NSMutableArray array];
-    for (NSInteger i = 0; i < 9; i++) {
-        CAShapeLayer *ink = [CAShapeLayer layer];
-        ink.fillColor = nil;
-        ink.strokeColor = RGB(.56 + .032*i, .50 + .042*i, .98).CGColor;
-        ink.opacity = .28 + .07*i;
-        ink.lineWidth = i == 8 ? 1.7 : 1;
-        ink.lineCap = kCALineCapRound;
-        [self.layer addSublayer:ink];
-        [strands addObject:ink];
-    }
-    _strands = strands;
-    return self;
-}
+@implementation VoiceCard
 - (void)drawRect:(NSRect)dirty {
-    NSGradient *ink = [[NSGradient alloc] initWithColors:@[RGB(.11,.105,.19), RGB(.18,.16,.32), RGB(.33,.28,.58)]];
-    [ink drawInRect:self.bounds angle:24];
-}
-- (void)layout {
-    [super layout];
-    // Draw one folded ribbon in the space above the status text.
-    CGFloat width = NSWidth(self.bounds), height = NSHeight(self.bounds);
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    for (NSUInteger i = 0; i < _strands.count; i++) {
-        CGFloat t = i / 8.0;
-        CGMutablePathRef path = CGPathCreateMutable();
-        for (NSInteger x = 0; x <= 225; x++) {
-            CGFloat u = x / 225.0;
-            CGFloat amplitude = pow(sin(M_PI*u), 1.25) * 22;
-            CGFloat y = height - 27 + amplitude * sin(2.7*M_PI*u + 1.8*t)
-                + 6*(t-.5)*sin(M_PI*u);
-            if (!x) CGPathMoveToPoint(path, NULL, width-218, y);
-            else CGPathAddLineToPoint(path, NULL, width-218+x, y);
-        }
-        _strands[i].path = path;
-        CGPathRelease(path);
+    NSBezierPath *plate = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds, .5, .5)
+                                                          xRadius:14 yRadius:14];
+    [RGB(.08, .18, .18) setFill];
+    [plate fill];
+    [RGB(.26, .37, .36) setStroke];
+    [plate stroke];
+
+    // The two brass stops and scale echo the carriage on Sayso’s typewriter.
+    CGFloat left = 20, right = NSWidth(self.bounds) - left, top = NSMaxY(self.bounds) - 12;
+    NSBezierPath *scale = [NSBezierPath bezierPath];
+    [scale moveToPoint:NSMakePoint(left, top)];
+    [scale lineToPoint:NSMakePoint(right, top)];
+    for (NSInteger tick = 1; left + tick * 6 < right - 2; tick++) {
+        CGFloat x = left + tick * 6;
+        [scale moveToPoint:NSMakePoint(x, top)];
+        [scale lineToPoint:NSMakePoint(x, top - (tick % 5 == 0 ? 6 : 3))];
     }
-    [CATransaction commit];
-}
-- (void)revealWave {
-    if (NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) return;
-    for (NSUInteger i = 0; i < _strands.count; i++) {
-        CABasicAnimation *draw = [CABasicAnimation animationWithKeyPath:@"strokeEnd"];
-        draw.fromValue = @0;
-        draw.toValue = @1;
-        draw.duration = .28 + .014 * i;
-        draw.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
-        [_strands[i] addAnimation:draw forKey:@"ink"];
+    [RGB(.36, .47, .44) setStroke];
+    scale.lineWidth = .75;
+    [scale stroke];
+    [RGB(.96, .81, .40) setFill];
+    for (NSNumber *stop in @[@(left), @(right)]) {
+        [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(stop.doubleValue - 1.5, top - 5, 3, 7)
+                                         xRadius:1 yRadius:1] fill];
     }
 }
 @end
@@ -113,7 +73,7 @@ void SaysoReveal(NSView *view, CGFloat offset) {
 }
 
 - (NSSize)intrinsicContentSize {
-    return NSMakeSize(super.intrinsicContentSize.width + 20, 38);
+    return NSMakeSize(super.intrinsicContentSize.width + 20, 36);
 }
 
 - (void)updateTrackingAreas {
@@ -129,14 +89,14 @@ void SaysoReveal(NSView *view, CGFloat offset) {
 - (void)drawRect:(NSRect)dirty {
     NSRect rect = NSInsetRect(self.bounds, .5, .5);
     NSBezierPath *shape = [NSBezierPath bezierPathWithRoundedRect:rect xRadius:10 yRadius:10];
-    NSColor *base = RGB(.34,.28,.72);
-    NSColor *top = RGB(.42,.35,.79);
-    if (self.highlighted) top = base = RGB(.28,.22,.62);
-    else if (_hovered) top = RGB(.47,.40,.84);
-    if (self.enabled) [[[NSGradient alloc] initWithStartingColor:top endingColor:base] drawInBezierPath:shape angle:90];
-    else { [NSColor.quaternaryLabelColor setFill]; [shape fill]; }
+    NSColor *fill = RGB(1, .84, .39);
+    if (!self.enabled) fill = RGB(.23, .32, .31);
+    else if (self.highlighted) fill = RGB(.92, .71, .26);
+    else if (_hovered) fill = RGB(1, .89, .55);
+    [fill setFill];
+    [shape fill];
 
-    NSColor *ink = self.enabled ? NSColor.whiteColor : NSColor.secondaryLabelColor;
+    NSColor *ink = self.enabled ? RGB(.12, .16, .13) : RGB(.82, .86, .83);
     NSDictionary *type = @{NSFontAttributeName:[NSFont systemFontOfSize:13 weight:NSFontWeightSemibold],
                            NSForegroundColorAttributeName:ink};
     NSSize titleSize = [self.title sizeWithAttributes:type];

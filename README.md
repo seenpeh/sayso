@@ -6,10 +6,10 @@ Sayso is a macOS menu bar app that types local Whisper dictation directly into t
 
 ## Start dictating
 
-1. Quit the previous VoiceKey version if it’s running. Unzip **Sayso.app**, move it to **Applications**, and open it. This build supports Apple silicon on macOS 14 or later.
-2. Click the typewriter in the menu bar, choose **Nava · فارسی** for Persian or **Whisper Large v3 Turbo** for multilingual dictation, and click **Download**.
-3. Click where you want to type and press **Option–Shift–Space**. On first use, allow **Accessibility** for keyboard entry and **Microphone** for recording. Return to the text field and press the shortcut again if prompted.
-4. Speak naturally. A brief pause sends each phrase for recognition. During continuous speech, Sayso also processes short sections. Press the shortcut again, or click the recording icon in the menu bar, to finish the last phrase. Keep the destination field focused until typing finishes.
+1. Unzip **Sayso.app**, move it to **Applications**, and open it. Sayso runs on Apple silicon with macOS 14 or later.
+2. Click the typewriter in the menu bar. Under **Speech model**, choose **Nava · فارسی** for Persian or **Whisper Large v3 Turbo** for multilingual dictation. Click **Download model**.
+3. Click in a text field. With the default shortcut, double-tap **Right Shift** and hold the second press while speaking. On first use, allow **Accessibility** for keyboard entry and **Microphone** for recording, then return to the text field.
+4. Pause briefly to type each phrase. Release **Right Shift** to finish and keep the text field focused until the floating indicator disappears. If you use a custom shortcut, **Settings → Recording** shows the gesture and how to stop.
 
 Twelve bars in the floating indicator rise and fall with your voice. When you stop recording, the bars curl along a shared path into an eight-spoke ring. Each spoke then turns in place around its own long axis while Sayso finishes typing, then the indicator disappears. Your text field keeps focus. If another app owns the shortcut, use **Start dictation** in the popover or choose a different shortcut in Settings. Secure fields and apps that ignore synthetic Unicode keyboard events may not accept dictation.
 
@@ -24,8 +24,6 @@ In **Settings → Models → Spoken language**, choose **Persian · فارسی**
 
 Downloads can be paused and resumed and are verified by size and SHA-256. **Unload** frees the model while keeping the download. **Move to Trash** removes it. Existing models and preferences use the original VoiceKey bundle identifier and the folder `~/Library/Application Support/VoiceKey/Models/`.
 
-By default, double-tap **Right Shift** and hold the second press to dictate. Release it to stop. Existing shortcut preferences are preserved.
-
 In **Settings → Recording**, choose **Toggle** to perform the same gesture to start and stop, or **Hold** to stop when you release the shortcut.
 
 | Shortcut gesture | Toggle recording | Hold recording |
@@ -38,18 +36,30 @@ Every shortcut needs Command, Control, Option, or Shift. Tap requires a combinat
 
 ## Updates
 
-If you use a previous 1.1–1.9 release, install 1.0.13 once from GitHub Releases. Those apps compare version numbers numerically and will skip 1.0.13.
-
 Sayso checks the latest stable release on [GitHub](https://github.com/seenpeh/sayso/releases) at launch, when reopened and every 24 hours while running. You can also use **Settings → General → Check for Updates**. Select **Install … and restart** to download the release, verify its checksum and app signature, replace the current copy and reopen it. Install the app in a writable folder before updating.
+
+If you still have a historical build numbered 1.2 through 1.9, download the [Sayso 1.2 release](https://github.com/seenpeh/sayso/releases/tag/v1.2.0) manually once. Those builds compare version numbers and may skip this update.
 
 ## Build and release
 
 Install the Xcode Command Line Tools and run this on an Apple silicon Mac.
 
 ```sh
-./build.sh "$PWD/Sayso-1.0.13-macOS-arm64.zip"
+./build.sh
 ```
 
-To publish an update, bump the version and build number in `Resources/Info.plist`. Create a stable GitHub release with a matching numeric tag such as `v1.0.13` and attach the build as `Sayso-1.0.13-macOS-arm64.zip`. A DMG with the same base name and the app at its root also works. The updater selects the matching architecture and verifies the SHA-256 digest supplied by GitHub. The local build is ad hoc signed.
+To publish an update, bump the version and build number in `Resources/Info.plist`. Create a stable GitHub release with a matching numeric tag and attach the build as `Sayso-<version>-macOS-arm64.zip`. A DMG with the same base name and the app at its root also works. The updater selects the matching architecture and verifies the SHA-256 digest supplied by GitHub.
+
+### Preserve Accessibility across updates
+
+Release ZIPs require a code signing certificate. Use the same certificate for every release so macOS can recognize the same app across updates. A regular `./build.sh` app build can still use ad hoc signing for local development.
+
+For releases without a paid Apple Developer account, open Keychain Access and choose **Certificate Assistant → Create a Certificate**. Select **Self Signed Root** and **Code Signing**. Keep the identity in your signing keychain and back up the certificate and private key securely. Run `security find-identity -p codesigning` and use the certificate’s SHA-1 fingerprint below.
+
+```sh
+SAYSO_SIGNING_IDENTITY="<certificate fingerprint>" ./build.sh "$PWD/Sayso-<version>-macOS-arm64.zip"
+```
+
+Set `SAYSO_SIGNING_KEYCHAIN` if the identity lives in a separate keychain. A self-signed release may require first-launch approval in Gatekeeper. When switching from an ad hoc release, macOS may ask you to grant Accessibility again once. If the old Sayso entry is stale, remove it and add the installed copy under **System Settings → Privacy & Security → Accessibility**. After migration, the updater requires incoming builds to satisfy the installed app’s signing requirement.
 
 The runtime is [whisper.cpp v1.8.4](https://github.com/ggml-org/whisper.cpp/releases/tag/v1.8.4). Weights come from [Nava GGML](https://huggingface.co/Nimruz/Nava-ggml) and the [multilingual Whisper collection](https://huggingface.co/ggerganov/whisper.cpp).

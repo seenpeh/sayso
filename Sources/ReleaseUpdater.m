@@ -169,6 +169,7 @@ static BOOL InstallBundle(NSURL *archive, NSDictionary *asset, NSString *version
 - (void)check {
     if (_checking || _installing) return;
     _checking = YES;
+    _installError = nil;
     _status = @"Checking GitHub…";
     if (self.changed) self.changed();
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:releasesAPI]
@@ -214,6 +215,7 @@ static BOOL InstallBundle(NSURL *archive, NSDictionary *asset, NSString *version
 - (void)install {
     if (!_asset || _checking || _installing) return;
     _installing = YES;
+    _installError = nil;
     _status = @"Downloading and verifying the update…";
     if (self.changed) self.changed();
     NSDictionary *asset = _asset;
@@ -236,7 +238,8 @@ static BOOL InstallBundle(NSURL *archive, NSDictionary *asset, NSString *version
                 if ([relaunch launchAndReturnError:NULL]) { [NSApp terminate:nil]; return; }
             }
             self->_installing = NO;
-            self->_status = error.localizedDescription ?: @"Update installed. Quit and reopen Sayso.";
+            self->_installError = error.localizedDescription;
+            self->_status = self->_installError ?: @"Update installed. Quit and reopen Sayso.";
             if (!error) { self->_asset = nil; self->_availableVersion = nil; }
             if (self.changed) self.changed();
         });

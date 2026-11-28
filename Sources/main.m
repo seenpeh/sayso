@@ -180,8 +180,8 @@ static NSString *ShortcutProblem(UInt32 key, UInt32 mods, NSString *title, Gestu
 @property (strong) NSMutableIndexSet *pressedKeys;
 @property (strong) id globalMonitor;
 @property (strong) id localMonitor;
-@property (strong) NSPopUpButton *modePicker;
-@property (strong) NSPopUpButton *gesturePicker;
+@property (strong) NSSegmentedControl *modePicker;
+@property (strong) NSSegmentedControl *gesturePicker;
 @property (strong) NSButton *resetButton;
 @property (strong) RecordingIndicator *indicator;
 @property BOOL shortcutSession;
@@ -200,7 +200,6 @@ static NSString *ShortcutProblem(UInt32 key, UInt32 mods, NSString *title, Gestu
 @property (strong) NSTableView *settingsNav;
 @property (strong) NSTabView *settingsTabs;
 @property (strong) NSTextField *modeHint;
-@property (strong) VoiceCard *voiceCard;
 @property (strong) ShortcutButton *shortcutButton;
 @property (strong) NSTextField *shortcutMessage;
 @property (strong) NSSwitch *loginButton;
@@ -217,6 +216,7 @@ static NSString *ShortcutProblem(UInt32 key, UInt32 mods, NSString *title, Gestu
 @property (strong) NSButton *updateButton;
 @property (strong) NSButton *settingsUpdate;
 @property (strong) NSTextField *updateStatus;
+@property (strong) NSTextField *popoverUpdateError;
 @property (strong) NSDate *lastCheck;
 @property (strong) NSTimer *updateTimer;
 @property (copy) NSString *offeredVersion;
@@ -226,7 +226,6 @@ static NSString *ShortcutProblem(UInt32 key, UInt32 mods, NSString *title, Gestu
 @property (strong) NSTextField *headline;
 @property (strong) NSTextField *detail;
 @property (strong) NSTextField *modelLabel;
-@property (strong) NSTextField *keyLabel;
 @property (strong) NSImageView *stateImage;
 @property (strong) NSProgressIndicator *progress;
 @property (strong) NSPopUpButton *modelPicker;
@@ -413,6 +412,9 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     [self populatePicker:picker];
     [picker selectItemAtIndex:self.selectedModel == noModel ? (NSInteger)models.count : self.selectedModel];
     [picker setAccessibilityLabel:@"Speech recognition model"];
+    picker.cell.lineBreakMode = NSLineBreakByTruncatingTail;
+    [picker setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                     forOrientation:NSLayoutConstraintOrientationHorizontal];
     picker.target = self;
     picker.action = @selector(selectModel:);
     return picker;
@@ -533,14 +535,14 @@ static OSStatus ShortcutReleased(EventHandlerCallRef next, EventRef event, void 
     [defaults setObject:self.shortcutTitle forKey:@"shortcutTitle"];
 }
 
-- (void)changeMode:(NSPopUpButton *)sender {
+- (void)changeMode:(NSSegmentedControl *)sender {
     [self.gesture cancel];
-    if (sender == self.modePicker) self.gesture.mode = sender.indexOfSelectedItem;
+    if (sender == self.modePicker) self.gesture.mode = sender.selectedSegment;
     else {
-        GestureKind kind = sender.indexOfSelectedItem;
+        GestureKind kind = sender.selectedSegment;
         NSString *problem = ShortcutProblem(self.shortcutKey, self.shortcutModifiers, self.shortcutTitle, kind);
         if (problem) {
-            [sender selectItemAtIndex:self.gesture.kind];
+            sender.selectedSegment = self.gesture.kind;
             [self endShortcutCapture:@"Choose a Tap-compatible shortcut first, such as Option–Space."];
             return;
         }
@@ -618,16 +620,12 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     NSStackView *shortcut = Stack(NSUserInterfaceLayoutOrientationHorizontal, @[self.shortcutButton, self.resetButton], 5);
     self.shortcutMessage = Caption(@"Click the shortcut, then press a new key combination.");
 
-    self.modePicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.modePicker addItemsWithTitles:@[@"Toggle", @"Hold"]];
-    self.gesturePicker = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.gesturePicker addItemsWithTitles:@[@"Tap", @"Hold", @"Double tap"]];
-    [self.modePicker selectItemAtIndex:self.gesture.mode];
-    [self.gesturePicker selectItemAtIndex:self.gesture.kind];
-    for (NSPopUpButton *picker in @[self.modePicker, self.gesturePicker]) {
-        picker.target = self;
-        picker.action = @selector(changeMode:);
-    }
+    self.modePicker = [NSSegmentedControl segmentedControlWithLabels:@[@"Toggle", @"Hold"]
+        trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(changeMode:)];
+    self.gesturePicker = [NSSegmentedControl segmentedControlWithLabels:@[@"Tap", @"Hold", @"Double tap"]
+        trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(changeMode:)];
+    self.modePicker.selectedSegment = self.gesture.mode;
+    self.gesturePicker.selectedSegment = self.gesture.kind;
     [self.modePicker setAccessibilityLabel:@"Recording mode"];
     [self.gesturePicker setAccessibilityLabel:@"Shortcut gesture"];
     NSSwitch *sounds = [NSSwitch new];
@@ -668,19 +666,19 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     NSString *version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"";
     NSButton *releases = [self button:@"GitHub Releases…" action:@selector(openReleases:)];
     NSStackView *updates = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-        @[self.checkButton, self.settingsUpdate, FlexibleSpace(), releases], 6);
+        @[self.checkButton, self.settingsUpdate, FlexibleSpace()], 6);
 
     NSArray *groups = @[
-        @[PreferenceGroup(@[PreferenceRow(@"Recording mode", self.modePicker), self.modeHint, Rule(),
-                            PreferenceRow(@"Shortcut gesture", self.gesturePicker)]),
-          PreferenceGroup(@[PreferenceRow(@"Global shortcut", shortcut), self.shortcutMessage]),
+        @[PreferenceGroup(@[PreferenceRow(@"Global shortcut", shortcut), self.shortcutMessage, Rule(),
+                            PreferenceRow(@"Shortcut gesture", self.gesturePicker), Rule(),
+                            PreferenceRow(@"Recording mode", self.modePicker), self.modeHint]),
           PreferenceGroup(@[PreferenceRow(@"Recording sounds", sounds)])],
-        @[PreferenceGroup(@[PreferenceRow(@"Local model", self.settingsPicker), self.settingsModelStatus,
+        @[PreferenceGroup(@[PreferenceRow(@"Speech model", self.settingsPicker), self.settingsModelStatus,
                             self.settingsProgress, modelActions]),
           PreferenceGroup(@[PreferenceRow(@"Spoken language", self.languagePicker)])],
         @[PreferenceGroup(@[PreferenceRow(@"Start Sayso at login", self.loginButton), self.loginMessage,
                             Stack(NSUserInterfaceLayoutOrientationHorizontal, @[self.loginSettingsButton, FlexibleSpace()], 4)]),
-          PreferenceGroup(@[Label([@"Sayso " stringByAppendingString:version], 14, NSFontWeightSemibold, NSColor.labelColor),
+          PreferenceGroup(@[PreferenceRow([@"Sayso " stringByAppendingString:version], releases),
                             self.updateStatus, updates]),
           Stack(NSUserInterfaceLayoutOrientationHorizontal, @[FlexibleSpace(), self.uninstallButton], 0)]
     ];
@@ -689,6 +687,12 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskFullSizeContentView
         backing:NSBackingStoreBuffered defer:NO];
     self.settingsWindow.title = @"Sayso Settings";
+    self.settingsWindow.backgroundColor = [NSColor colorWithName:nil dynamicProvider:^NSColor *(NSAppearance *appearance) {
+        BOOL dark = [[appearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]]
+            isEqual:NSAppearanceNameDarkAqua];
+        return dark ? [NSColor colorWithSRGBRed:.12 green:.14 blue:.14 alpha:1] :
+                      [NSColor colorWithSRGBRed:.97 green:.965 blue:.945 alpha:1];
+    }];
     self.settingsWindow.titleVisibility = NSWindowTitleHidden;
     self.settingsWindow.titlebarAppearsTransparent = YES;
     self.settingsWindow.movableByWindowBackground = YES;
@@ -703,7 +707,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     sidebar.translatesAutoresizingMaskIntoConstraints = NO;
     [content addSubview:sidebar];
     NSStackView *brand = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-        @[SaysoMark(30), Label(@"Sayso", 19, NSFontWeightSemibold, NSColor.labelColor)], 9);
+        @[SaysoMark(38), Label(@"Sayso", 21, NSFontWeightSemibold, NSColor.labelColor)], 9);
     [sidebar addSubview:brand];
     brand.translatesAutoresizingMaskIntoConstraints = NO;
     NSArray *titles = @[@"Recording", @"Models", @"General"];
@@ -733,6 +737,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     for (NSUInteger i = 0; i < groups.count; i++) {
         NSString *title = titles[i];
         NSTextField *heading = Label(title, 27, NSFontWeightBold, NSColor.labelColor);
+        heading.font = SaysoHeadingFont(29);
         NSStackView *section = Column([@[heading] arrayByAddingObjectsFromArray:groups[i]], 12);
         [section setCustomSpacing:20 afterView:heading];
         section.translatesAutoresizingMaskIntoConstraints = NO;
@@ -883,8 +888,8 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
 - (void)resetShortcut:(id)sender {
     self.gesture.kind = DoubleTapGesture;
     self.gesture.mode = HoldRecording;
-    [self.modePicker selectItemAtIndex:HoldRecording];
-    [self.gesturePicker selectItemAtIndex:DoubleTapGesture];
+    self.modePicker.selectedSegment = HoldRecording;
+    self.gesturePicker.selectedSegment = DoubleTapGesture;
     [self setShortcutKey:kVK_RightShift modifiers:shiftKey title:defaultShortcut];
 }
 
@@ -940,47 +945,33 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
 }
 
 - (void)buildPopover {
-    const CGFloat width = 330;
-    NSColor *secondary = NSColor.secondaryLabelColor;
-    self.keyLabel = Label(@"", 12, NSFontWeightMedium, secondary);
-    self.keyLabel.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightMedium];
+    const CGFloat width = 340;
+    NSButton *settings = [self button:@"Settings…" action:@selector(showSettings:)];
+    settings.image = Symbol(@"gearshape", nil, 12);
+    settings.imagePosition = NSImageLeading;
+    settings.controlSize = NSControlSizeSmall;
+    NSButton *quit = [self button:@"Quit" action:@selector(quit:)];
+    quit.bordered = NO;
+    quit.font = [NSFont systemFontOfSize:12];
+    [quit setAccessibilityLabel:@"Quit Sayso"];
     NSStackView *header = Stack(NSUserInterfaceLayoutOrientationHorizontal,
-        @[SaysoMark(28), Label(@"Sayso", 19, NSFontWeightSemibold, NSColor.labelColor), FlexibleSpace(), self.keyLabel], 8);
+        @[SaysoMark(38), Label(@"Sayso", 21, NSFontWeightSemibold, NSColor.labelColor),
+          FlexibleSpace(), settings, quit], 6);
 
-    self.voiceCard = [VoiceCard new];
-    self.stateImage = [NSImageView new];
     self.headline = [NSTextField wrappingLabelWithString:@""];
-    self.headline.font = [NSFont systemFontOfSize:23 weight:NSFontWeightSemibold];
-    self.headline.textColor = NSColor.whiteColor;
+    self.headline.font = SaysoHeadingFont(24);
+    self.headline.textColor = [NSColor colorWithSRGBRed:1 green:.98 blue:.92 alpha:1];
+    self.stateImage = [NSImageView new];
+    [self.stateImage.widthAnchor constraintEqualToConstant:20].active = YES;
+    [self.stateImage.heightAnchor constraintEqualToConstant:21].active = YES;
+    [self.stateImage setAccessibilityElement:NO];
+    NSStackView *status = Stack(NSUserInterfaceLayoutOrientationHorizontal,
+        @[self.stateImage, self.headline], 8);
+    [self.headline setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                              forOrientation:NSLayoutConstraintOrientationHorizontal];
     self.detail = [NSTextField wrappingLabelWithString:@""];
     self.detail.font = [NSFont systemFontOfSize:13];
-    self.detail.textColor = [NSColor colorWithSRGBRed:.87 green:.86 blue:.95 alpha:1];
-    for (NSView *view in @[self.stateImage, self.headline, self.detail]) {
-        view.translatesAutoresizingMaskIntoConstraints = NO;
-        [self.voiceCard addSubview:view];
-    }
-    [NSLayoutConstraint activateConstraints:@[
-        [self.stateImage.leadingAnchor constraintEqualToAnchor:self.voiceCard.leadingAnchor constant:17],
-        [self.stateImage.topAnchor constraintEqualToAnchor:self.voiceCard.topAnchor constant:16],
-        [self.stateImage.widthAnchor constraintEqualToConstant:23],
-        [self.stateImage.heightAnchor constraintEqualToConstant:23],
-        [self.headline.leadingAnchor constraintEqualToAnchor:self.voiceCard.leadingAnchor constant:17],
-        [self.headline.trailingAnchor constraintEqualToAnchor:self.voiceCard.trailingAnchor constant:-17],
-        [self.headline.topAnchor constraintEqualToAnchor:self.voiceCard.topAnchor constant:51],
-        [self.detail.leadingAnchor constraintEqualToAnchor:self.headline.leadingAnchor],
-        [self.detail.trailingAnchor constraintEqualToAnchor:self.headline.trailingAnchor],
-        [self.detail.topAnchor constraintEqualToAnchor:self.headline.bottomAnchor constant:4],
-        [self.detail.bottomAnchor constraintEqualToAnchor:self.voiceCard.bottomAnchor constant:-16]
-    ]];
-
-    self.modelPicker = [self newModelPicker];
-    NSStackView *modelRow = PreferenceRow(@"Local model", self.modelPicker);
-    self.modelLabel = Caption(@"");
-    self.progress = [NSProgressIndicator new];
-    self.progress.indeterminate = NO;
-    self.progress.controlSize = NSControlSizeSmall;
-    self.progress.maxValue = 1;
-    [self.progress setAccessibilityLabel:@"Model download progress"];
+    self.detail.textColor = [NSColor colorWithSRGBRed:.85 green:.90 blue:.86 alpha:1];
 
     self.recordButton = [DictationActionButton buttonWithTitle:@"Start dictation" target:self action:@selector(toggleRecording:)];
     self.downloadButton = [DictationActionButton buttonWithTitle:@"Download model" target:self action:@selector(downloadModel:)];
@@ -990,31 +981,38 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
         button.bordered = NO;
         button.focusRingType = NSFocusRingTypeExterior;
     }
-    self.recordButton.image = Symbol(@"mic.fill", nil, 13);
+    NSStackView *cardContent = Column(@[status, self.detail, self.downloadButton, self.recordButton], 6);
+    [cardContent setCustomSpacing:14 afterView:self.detail];
+    VoiceCard *card = [VoiceCard new];
+    cardContent.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:cardContent];
+    [NSLayoutConstraint activateConstraints:@[
+        [cardContent.topAnchor constraintEqualToAnchor:card.topAnchor constant:30],
+        [cardContent.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:18],
+        [cardContent.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-18],
+        [cardContent.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-16]
+    ]];
+
+    self.modelPicker = [self newModelPicker];
+    NSStackView *modelRow = PreferenceRow(@"Speech model", self.modelPicker);
+    self.modelLabel = Caption(@"");
+    self.progress = [NSProgressIndicator new];
+    self.progress.indeterminate = NO;
+    self.progress.controlSize = NSControlSizeSmall;
+    self.progress.maxValue = 1;
+    [self.progress setAccessibilityLabel:@"Model download progress"];
     self.updateButton = [self button:@"Install update…" action:@selector(updateAction:)];
-    NSButton *settings = [self button:@"Settings…" action:@selector(showSettings:)];
-    settings.image = Symbol(@"gearshape", nil, 12);
-    settings.imagePosition = NSImageLeading;
-    NSButton *quit = [self button:@"Quit Sayso" action:@selector(quit:)];
-    for (NSButton *button in @[settings, quit]) {
-        button.bordered = NO;
-        button.font = [NSFont systemFontOfSize:12];
-    }
-    NSStackView *footer = Stack(NSUserInterfaceLayoutOrientationHorizontal, @[settings, FlexibleSpace(), quit], 8);
-    NSBox *line = Rule();
-    self.page = Column(@[header, self.voiceCard, modelRow, self.modelLabel, self.progress, self.downloadButton, self.recordButton,
-          self.updateButton, line, footer], 9);
-    [self.page setCustomSpacing:14 afterView:header];
-    [self.page setCustomSpacing:13 afterView:self.voiceCard];
-    [self.page setCustomSpacing:2 afterView:modelRow];
-    [self.page setCustomSpacing:13 afterView:self.modelLabel];
+    self.popoverUpdateError = Caption(@"");
+    self.page = Column(@[header, card, modelRow, self.modelLabel, self.progress, self.updateButton, self.popoverUpdateError], 8);
+    [self.page setCustomSpacing:15 afterView:card];
+    [self.page setCustomSpacing:4 afterView:modelRow];
     self.page.translatesAutoresizingMaskIntoConstraints = NO;
     NSViewController *controller = [NSViewController new];
-    NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width + 32, 350)];
+    NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width + 32, 320)];
     controller.view = content;
     [content addSubview:self.page];
     [NSLayoutConstraint activateConstraints:@[
-        [self.page.topAnchor constraintEqualToAnchor:content.topAnchor constant:16],
+        [self.page.topAnchor constraintEqualToAnchor:content.topAnchor constant:12],
         [self.page.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:16],
         [self.page.widthAnchor constraintEqualToConstant:width]
     ]];
@@ -1029,10 +1027,10 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
         NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
         if (front.processIdentifier != NSRunningApplication.currentApplication.processIdentifier)
             self.popoverDestination = front;
+        [self refresh];
         self.popover.animates = !NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion;
         [self.popover showRelativeToRect:self.statusItem.button.bounds ofView:self.statusItem.button
                           preferredEdge:NSRectEdgeMinY];
-        [self.voiceCard revealWave];
     }
 }
 
@@ -1063,6 +1061,20 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     return size.unsignedLongLongValue == [models[self.selectedModel][@"bytes"] unsignedLongLongValue];
 }
 
+- (NSString *)shortcutInstructions {
+    NSString *key = self.shortcutTitle;
+    if (self.gesture.mode == HoldRecording) {
+        if (self.gesture.kind == DoubleTapGesture)
+            return [NSString stringWithFormat:@"Double-tap %@ and hold the second press. Release to finish.", key];
+        if (self.gesture.kind == HoldGesture)
+            return [NSString stringWithFormat:@"Hold %@ until recording starts. Release to finish.", key];
+        return [NSString stringWithFormat:@"Hold %@ while you speak. Release to finish.", key];
+    }
+    NSString *verb = self.gesture.kind == DoubleTapGesture ? @"Double-tap" :
+                     self.gesture.kind == HoldGesture ? @"Hold" : @"Press";
+    return [NSString stringWithFormat:@"%@ %@ to start. Repeat to finish.", verb, key];
+}
+
 - (void)refresh {
     if (self.indicatorPhase != self.phase) {
         if (self.phase == Recording) [self.indicator showListening];
@@ -1073,14 +1085,16 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     BOOL hasSelection = self.selectedModel != noModel;
     BOOL installed = [self modelExists];
     BOOL downloading = self.phase == Downloading || self.phase == CancelingDownload || self.phase == Verifying;
-    BOOL denied = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] == AVAuthorizationStatusDenied;
+    AVAuthorizationStatus mic = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    BOOL keyboardAccess = AXIsProcessTrusted();
+    NSString *instructions = [self shortcutInstructions];
     NSString *title = installed ? @"Ready to dictate" : @"Set up dictation";
-    NSString *subtitle = installed ? @"Place your cursor in a text field and use your recording shortcut." :
-                                    @"Download a speech model to transcribe on your Mac.";
+    NSString *subtitle = installed ? instructions :
+                                    @"Download the selected speech model to dictate on this Mac.";
     NSString *stateSymbol = installed ? @"waveform" : @"arrow.down.circle";
     if (!hasSelection) {
         title = @"No active model";
-        subtitle = @"Choose a local model below to set up dictation.";
+        subtitle = @"Choose a speech model below to start dictating.";
         stateSymbol = @"waveform";
     }
     NSString *menuSymbol = nil;
@@ -1091,14 +1105,26 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
             if (self.failed) {
                 title = @"Needs attention";
                 stateSymbol = @"exclamationmark.circle";
-                tint = NSColor.systemOrangeColor;
-            }
-            if (self.notice) subtitle = self.notice;
-            else if (installed && self.shortcutStatus != noErr) subtitle = @"The shortcut is unavailable. Click Start dictation below.";
+                subtitle = self.notice ?: @"Try again.";
+            } else if (installed && mic == AVAuthorizationStatusRestricted) {
+                title = @"Microphone restricted";
+                subtitle = @"This Mac restricts microphone access. Contact your administrator.";
+                stateSymbol = @"mic.slash";
+            } else if (installed && !keyboardAccess) {
+                title = @"Allow keyboard access";
+                subtitle = @"Enable Sayso in Accessibility so it can type into your text field.";
+                stateSymbol = @"keyboard";
+            } else if (installed && mic == AVAuthorizationStatusDenied) {
+                title = @"Allow microphone access";
+                subtitle = @"Enable Sayso in Microphone settings to record your voice.";
+                stateSymbol = @"mic.slash";
+            } else if (installed && self.shortcutStatus != noErr) {
+                subtitle = @"Click Start dictation, or choose a different shortcut in Settings.";
+            } else if (self.notice) subtitle = self.notice;
             break;
         case Downloading:
         case CancelingDownload:
-            title = self.phase == Downloading ? @"Downloading model…" : @"Canceling download…";
+            title = self.phase == Downloading ? @"Downloading model…" : @"Pausing download…";
             subtitle = self.notice ?: @"You can close this popover while the download runs.";
             break;
         case LookingUpModel:
@@ -1138,17 +1164,18 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     [self.statusItem.button setAccessibilityLabel:menuDescription];
     self.statusItem.button.contentTintColor = self.phase == Recording ? tint : nil;
     self.stateImage.image = Symbol(stateSymbol, nil, 19);
-    self.stateImage.contentTintColor = self.failed && self.phase == Idle ? NSColor.systemYellowColor : NSColor.whiteColor;
+    self.stateImage.contentTintColor = [NSColor colorWithSRGBRed:1 green:.84 blue:.39 alpha:1];
     self.headline.stringValue = title;
     self.detail.stringValue = subtitle;
-    self.keyLabel.stringValue = self.gesture.kind == TapGesture ? self.shortcutTitle :
-        [NSString stringWithFormat:@"%@ %@", self.gesture.kind == HoldGesture ? @"Hold" : @"Double-tap", self.shortcutTitle];
-    [self.keyLabel setAccessibilityLabel:[@"Global shortcut " stringByAppendingString:self.shortcutTitle]];
-    self.keyLabel.hidden = self.shortcutStatus != noErr;
-
     self.recordButton.title = self.phase == Recording ? @"Stop dictation" :
-                              denied ? @"Microphone Settings" : !AXIsProcessTrusted() ? @"Enable keyboard access…" : @"Start dictation";
-    self.recordButton.enabled = (installed && self.phase == Idle && !self.updater.installing) || self.phase == Recording;
+        mic == AVAuthorizationStatusRestricted ? @"Microphone restricted" :
+        !keyboardAccess ? @"Enable keyboard access…" :
+        mic == AVAuthorizationStatusDenied ? @"Open Microphone settings…" : @"Start dictation";
+    NSString *recordIcon = self.phase == Recording ? @"stop.fill" :
+        !keyboardAccess ? @"keyboard" : mic == AVAuthorizationStatusDenied ? @"gearshape" : @"mic.fill";
+    self.recordButton.image = Symbol(recordIcon, nil, 13);
+    self.recordButton.enabled = (installed && self.phase == Idle && !self.updater.installing &&
+                                 mic != AVAuthorizationStatusRestricted) || self.phase == Recording;
     self.recordButton.hidden = !installed || downloading;
     BOOL available = self.phase == Idle && !self.updater.installing;
     self.modelPicker.enabled = self.settingsPicker.enabled = available;
@@ -1163,21 +1190,22 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     self.settingsUpdate.hidden = !self.updater.availableVersion;
     self.checkButton.enabled = !self.updater.installing && !self.updater.checking;
     self.checkButton.title = self.updater.checking ? @"Checking…" : @"Check for Updates…";
-    self.modeHint.stringValue = self.gesture.mode == HoldRecording ?
-        @"Keep the shortcut pressed while speaking. Release to finish." :
-        @"Use your shortcut once to start and again to finish.";
+    self.modeHint.stringValue = instructions;
     self.modePicker.enabled = self.gesturePicker.enabled = available;
     self.shortcutButton.enabled = self.resetButton.enabled = available;
     self.updateButton.enabled = self.settingsUpdate.enabled = available && !self.updater.checking;
     self.updateStatus.stringValue = self.updater.status;
     self.updateButton.toolTip = self.updater.status;
-    if (self.updater.availableVersion && self.phase == Idle) {
+    self.popoverUpdateError.stringValue = self.updater.installError ?: @"";
+    self.popoverUpdateError.hidden = self.updater.installError == nil;
+    if (self.updater.installing) {
         self.detail.stringValue = self.updater.status;
-        if (self.updater.installing) self.headline.stringValue = @"Updating Sayso…";
+        self.headline.stringValue = @"Updating Sayso…";
     }
     NSInteger pickerIndex = hasSelection ? self.selectedModel : (NSInteger)models.count;
     [self.modelPicker selectItemAtIndex:pickerIndex];
     [self.settingsPicker selectItemAtIndex:pickerIndex];
+    self.modelPicker.toolTip = self.settingsPicker.toolTip = self.modelPicker.titleOfSelectedItem;
     self.downloadButton.hidden = !hasSelection || (installed && !downloading);
     BOOL resumable = hasSelection && !installed && [self partialSize] > 0;
     self.downloadButton.title = self.phase == Verifying ? @"Verifying model…" : self.phase == CancelingDownload ?
@@ -1198,7 +1226,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     self.progress.hidden = !downloading;
     self.progress.doubleValue = self.downloadedFraction;
     [self.page layoutSubtreeIfNeeded];
-    self.popover.contentSize = NSMakeSize(NSWidth(self.page.frame) + 32, ceil(self.page.fittingSize.height) + 32);
+    self.popover.contentSize = NSMakeSize(NSWidth(self.page.frame) + 32, ceil(self.page.fittingSize.height) + 30);
     self.settingsDownload.hidden = self.downloadButton.hidden;
     self.settingsDownload.enabled = !self.downloadButton.hidden && self.downloadButton.enabled;
     self.unloadButton.enabled = hasSelection && available;
@@ -1541,7 +1569,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
         [self displayError:error.localizedDescription];
         return;
     }
-    self.notice = error ? @"Download paused. Your progress is saved." : @"Model downloaded. You can record offline.";
+    self.notice = error ? @"Download paused. Your progress is saved." : nil;
     [self refresh];
 }
 
@@ -1599,6 +1627,12 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
         return;
     }
 
+    if (sender == self.recordButton && AXIsProcessTrusted() &&
+        [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] == AVAuthorizationStatusDenied) {
+        [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:
+            @"x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"]];
+        return;
+    }
     NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
     self.destination = front.processIdentifier == NSRunningApplication.currentApplication.processIdentifier &&
         self.popover.shown ? self.popoverDestination : front;
@@ -1627,9 +1661,6 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
             });
         }];
     } else {
-        if (sender == self.recordButton && permission == AVAuthorizationStatusDenied)
-            [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:
-                @"x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"]];
         [self displayError:@"Microphone access is unavailable. Check Privacy & Security → Microphone."];
     }
 }
@@ -1757,7 +1788,7 @@ static NSBox *PreferenceGroup(NSArray<NSView *> *views) {
     if (!samples) {
         if (self.phase == Transcribing) {
             self.phase = Idle;
-            if (!self.notice) self.notice = self.typedPhrase ? @"Dictation finished." : @"No speech detected.";
+            if (!self.notice && !self.typedPhrase) self.notice = @"No speech detected.";
             self.destination = nil;
             self.focusedElement = nil;
             if (self.shortcutSession) [self refresh]; else [self updateChanged];

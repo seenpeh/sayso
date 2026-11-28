@@ -3,6 +3,7 @@
 @interface ReleaseUpdater : NSObject
 @property (readonly, copy) NSString *status;
 @property (readonly, copy) NSString *availableVersion;
+@property (readonly, copy) NSString *installError;
 @property (readonly) BOOL checking;
 @property (readonly) BOOL installing;
 @property (copy) void (^changed)(void);
